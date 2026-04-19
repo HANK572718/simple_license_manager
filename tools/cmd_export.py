@@ -6,7 +6,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.prompt import Prompt
 
-from .db.crud import get_active_key, get_project
+from .db.crud import get_active_key
+from .ui import pick_project
 
 console = Console()
 
@@ -32,10 +33,8 @@ def cmd_export_menu() -> None:
 
 def _export_sdk() -> None:
     """Copy client_sdk/ and inject the project's public key + env prefix."""
-    project_id = Prompt.ask("專案 ID").strip()
-    project = get_project(project_id)
-    if not project:
-        console.print(f"[red]找不到專案 {project_id!r}[/red]")
+    project_id, project = pick_project()
+    if not project_id:
         return
 
     key = get_active_key(project_id)

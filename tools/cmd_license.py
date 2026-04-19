@@ -8,8 +8,9 @@ from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from .db.crud import create_license, get_active_key, get_project, list_licenses, revoke_license
+from .db.crud import create_license, get_active_key, list_licenses, revoke_license
 from .sign_license import sign
+from .ui import pick_project
 
 console = Console()
 
@@ -37,19 +38,9 @@ def cmd_license_menu() -> None:
             return
 
 
-def _pick_project():
-    """Prompt for a project ID and validate it exists."""
-    project_id = Prompt.ask("專案 ID").strip()
-    project = get_project(project_id)
-    if not project:
-        console.print(f"[red]找不到專案 {project_id!r}[/red]")
-        return None, None
-    return project_id, project
-
-
 def _issue_license() -> None:
     """Interactive wizard to sign and record a new license."""
-    project_id, project = _pick_project()
+    project_id, project = pick_project()
     if not project_id:
         return
 
@@ -126,7 +117,7 @@ def _issue_license() -> None:
 
 def _list_licenses() -> None:
     """Display all licenses for a project."""
-    project_id, _ = _pick_project()
+    project_id, _ = pick_project()
     if not project_id:
         return
 
@@ -160,7 +151,7 @@ def _list_licenses() -> None:
 
 def _revoke_license() -> None:
     """Revoke a license by its DB id."""
-    project_id, _ = _pick_project()
+    project_id, _ = pick_project()
     if not project_id:
         return
 

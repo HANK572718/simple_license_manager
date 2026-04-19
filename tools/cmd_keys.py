@@ -7,7 +7,8 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from .db.crud import create_key, get_active_key, get_project, list_keys
+from .db.crud import create_key, get_active_key, list_keys
+from .ui import pick_project
 
 console = Console()
 
@@ -35,21 +36,12 @@ def cmd_keys_menu() -> None:
             return
 
 
-def _pick_project() -> str | None:
-    """Prompt for a project ID and validate it exists."""
-    project_id = Prompt.ask("專案 ID").strip()
-    if not get_project(project_id):
-        console.print(f"[red]找不到專案 {project_id!r}[/red]")
-        return None
-    return project_id
-
-
 def _generate_key() -> None:
     """Generate a new RSA key pair for a project and persist to disk + DB."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
 
-    project_id = _pick_project()
+    project_id, _ = pick_project()
     if not project_id:
         return
 
@@ -96,7 +88,7 @@ def _generate_key() -> None:
 
 def _show_public_key() -> None:
     """Print the active public key PEM for embedding into verify_license.py."""
-    project_id = _pick_project()
+    project_id, _ = pick_project()
     if not project_id:
         return
 
@@ -111,7 +103,7 @@ def _show_public_key() -> None:
 
 def _list_keys() -> None:
     """Show all keys for a project in a table."""
-    project_id = _pick_project()
+    project_id, _ = pick_project()
     if not project_id:
         return
 
