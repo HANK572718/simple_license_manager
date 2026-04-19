@@ -18,10 +18,10 @@ def cmd_keys_menu() -> None:
     """Display the key management sub-menu and dispatch commands."""
     while True:
         console.print("\n[bold cyan]── 金鑰管理 ──[/bold cyan]")
-        console.print("  [g] 為專案產生新金鑰對")
-        console.print("  [s] 顯示公鑰內容（供嵌入 verify_license.py）")
-        console.print("  [l] 列出金鑰版本")
-        console.print("  [b] 返回主選單")
+        console.print("  \\[g] 為專案產生新金鑰對")
+        console.print("  \\[s] 顯示公鑰內容（供嵌入 verify_license.py）")
+        console.print("  \\[l] 列出金鑰版本")
+        console.print("  \\[b] 返回主選單")
 
         choice = Prompt.ask("選擇").strip().lower()
 

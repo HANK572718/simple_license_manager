@@ -20,10 +20,10 @@ def cmd_license_menu() -> None:
     """Display the license management sub-menu and dispatch commands."""
     while True:
         console.print("\n[bold cyan]── 授權管理 ──[/bold cyan]")
-        console.print("  [n] 簽發新授權")
-        console.print("  [l] 列出授權記錄")
-        console.print("  [r] 撤銷授權")
-        console.print("  [b] 返回主選單")
+        console.print("  \\[n] 簽發新授權")
+        console.print("  \\[l] 列出授權記錄")
+        console.print("  \\[r] 撤銷授權")
+        console.print("  \\[b] 返回主選單")
 
         choice = Prompt.ask("選擇").strip().lower()
 

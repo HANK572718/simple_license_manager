@@ -37,11 +37,11 @@ def main() -> None:
 
     while True:
         console.print("\n[bold]主選單[/bold]")
-        console.print("  [p] 專案管理")
-        console.print("  [k] 金鑰管理")
-        console.print("  [l] 授權管理")
-        console.print("  [e] 匯出客戶端 SDK")
-        console.print("  [q] 離開")
+        console.print("  \\[p] 專案管理")
+        console.print("  \\[k] 金鑰管理")
+        console.print("  \\[l] 授權管理")
+        console.print("  \\[e] 匯出客戶端 SDK")
+        console.print("  \\[q] 離開")
 
         choice = Prompt.ask("選擇").strip().lower()
 

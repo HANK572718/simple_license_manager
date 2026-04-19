@@ -19,8 +19,8 @@ def cmd_export_menu() -> None:
     """Display the export sub-menu and dispatch commands."""
     while True:
         console.print("\n[bold cyan]── SDK 匯出 ──[/bold cyan]")
-        console.print("  [e] 為專案匯出客戶端 SDK")
-        console.print("  [b] 返回主選單")
+        console.print("  \\[e] 為專案匯出客戶端 SDK")
+        console.print("  \\[b] 返回主選單")
 
         choice = Prompt.ask("選擇").strip().lower()
 

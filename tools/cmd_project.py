@@ -15,9 +15,9 @@ def cmd_project_menu() -> None:
     """Display the project sub-menu and dispatch commands."""
     while True:
         console.print("\n[bold cyan]── 專案管理 ──[/bold cyan]")
-        console.print("  [n] 新增專案")
-        console.print("  [l] 列出所有專案")
-        console.print("  [b] 返回主選單")
+        console.print("  \\[n] 新增專案")
+        console.print("  \\[l] 列出所有專案")
+        console.print("  \\[b] 返回主選單")
 
         choice = Prompt.ask("選擇").strip().lower()
 
