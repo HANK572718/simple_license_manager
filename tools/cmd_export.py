@@ -14,6 +14,7 @@ console = Console()
 _REPO_ROOT = Path(__file__).parent.parent
 _CLIENT_SDK = _REPO_ROOT / "client_sdk"
 _DIST = _REPO_ROOT / "dist"
+_INTEGRATION_GUIDE = _REPO_ROOT / "docs" / "integration_guide.md"
 
 
 def cmd_export_menu() -> None:
@@ -65,6 +66,12 @@ def _export_sdk() -> None:
         f'ENV_PREFIX: str = "{project.env_prefix}"',
     )
     verify_path.write_text(content, encoding="utf-8")
+
+    # Optionally include the integration guide
+    if _INTEGRATION_GUIDE.exists():
+        include = Prompt.ask("是否附帶整合說明文件 integration_guide.md？", choices=["y", "n"], default="y")
+        if include == "y":
+            shutil.copy2(_INTEGRATION_GUIDE, out_dir / "integration_guide.md")
 
     console.print(f"\n[green]✓ SDK 已匯出至 {out_dir}[/green]")
     console.print(f"  公鑰版本：v{key.version}")
