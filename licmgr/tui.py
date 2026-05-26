@@ -333,7 +333,7 @@ def _issue_license_tui(project_id: str) -> None:
         expires_at=expires_dt,
         lic_file_path=str(lic_file),
     )
-    console.print(f"\n[green]✓ 授權已簽發並儲存到：{lic_file}[/green]\n")
+    console.print(f"\n[green]✓ 授權已簽發並儲存到：{lic_file.resolve()}[/green]\n")
     console.print(lic_json)
 
 
@@ -397,7 +397,8 @@ def _sdk_menu() -> None:
         console.print("[red]無可用金鑰。請先產生金鑰。[/red]")
         return
 
-    out_raw = _ask(lambda: questionary.text(f"輸出目錄（直接 Enter 使用預設 ./dist/{pid}）：", default="").ask())
+    default_out = str((Path.cwd() / "dist" / pid).resolve())
+    out_raw = _ask(lambda: questionary.text("輸出目錄：", default=default_out).ask())
     out_dir = Path(out_raw) if out_raw else Path.cwd() / "dist" / pid
 
     if not _TEMPLATE_DIR.exists():
@@ -415,7 +416,7 @@ def _sdk_menu() -> None:
     content = content.replace(_ENV_PREFIX_PLACEHOLDER, f'ENV_PREFIX: str = "{project.env_prefix}"')
     verify_path.write_text(content, encoding="utf-8")
 
-    console.print(f"[green]✓ SDK 已匯出到：{out_dir}[/green]")
+    console.print(f"[green]✓ SDK 已匯出到：{out_dir.resolve()}[/green]")
     console.print(f"  公鑰版本 : v{key.version}")
     console.print(f"  環境前綴 : {project.env_prefix}")
     console.print("  [dim]將整個目錄交付給客戶即可。[/dim]")
@@ -536,6 +537,54 @@ def _import_db() -> None:
         console.print("[dim]  提示：私鑰路徑仍指向原始位置，請確認金鑰檔案可存取。[/dim]")
 
 
+# ── Help menu ─────────────────────────────────────────────────────────────────
+
+def _help_menu() -> None:
+    """Display a brief explanation of licmgr concepts and menu items."""
+    console.print(Panel(
+        "[bold cyan]licmgr — 功能說明[/bold cyan]",
+        expand=False,
+    ))
+    console.print("""
+[bold]核心概念[/bold]
+
+  一個 [cyan]專案[/cyan] 對應一個你要保護的軟體。
+  每個專案持有一把 [yellow]RSA 金鑰對[/yellow]（私鑰簽發 / 公鑰驗證），
+  並可為多台客戶機器各自簽發一份 [green]授權[/green]。
+
+  [dim]專案  1 : 1  金鑰對[/dim]
+  [dim]專案  1 : N  授權（每台機器一份）[/dim]
+
+[bold]主選單功能[/bold]
+
+  [cyan]📁 專案管理[/cyan]
+      建立或列出你管理的軟體專案。
+      每個專案有唯一 ID（如 MY_PROJ）、名稱與環境變數前綴。
+
+  [yellow]🔑 金鑰管理[/yellow]
+      為專案產生 RSA-2048 金鑰對。
+        私鑰 → 存於 ~/.licmgr/，永不離開本機
+        公鑰 → 嵌入 SDK，交給客戶用來驗證授權真偽
+      同一把私鑰可簽發給任意多台機器，不需重新生成。
+
+  [green]📄 授權管理[/green]
+      為每台客戶機器簽發獨立的 .lic 授權檔。
+      每份授權綁定一個機器指紋（64 字元 hex），換機即失效。
+      可簽發 / 列出 / 撤銷 / 重新匯出 .lic 檔。
+
+  [blue]📦 SDK 匯出[/blue]
+      匯出整合包（公鑰已嵌入的 verify_license.py），
+      直接交付給客戶整合進其應用程式。
+
+  [dim]📥 匯入舊資料庫[/dim]
+      從另一個 licmgr SQLite 資料庫匯入舊紀錄，跳過重複項目。
+
+  [dim]⚙  設定[/dim]
+      修改 DB 路徑、金鑰目錄、授權檔目錄；設定寫入 licmgr.toml。
+""")
+    _ask(lambda: questionary.press_any_key_to_continue("按任意鍵返回…").ask())
+
+
 # ── Settings menu ─────────────────────────────────────────────────────────────
 
 def _settings_menu() -> None:
@@ -630,6 +679,7 @@ def main() -> None:
         "📦  SDK 匯出": _sdk_menu,
         "📥  匯入舊資料庫": _import_db,
         "⚙   設定": _settings_menu,
+        "❓  說明": _help_menu,
         "🚪  離開": None,
     }
 

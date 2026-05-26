@@ -7,6 +7,23 @@
 
 ---
 
+## 前置需求
+
+使用 licmgr 前，必須先安裝 **Poetry 1.8 以上**：
+
+```bash
+# 尚未安裝 Poetry 時執行
+curl -sSL https://install.python-poetry.org | python3 -
+```
+
+確認安裝：
+
+```bash
+poetry --version   # 應顯示 Poetry (version 1.8.x) 以上
+```
+
+---
+
 ## 安裝（二擇一）
 
 ### 方式 A — 直接從 Git URL 安裝（推薦，無需 clone）
@@ -19,10 +36,29 @@ poetry self add git+https://github.com/HANK572718/simple_license_manager.git
 
 ```bash
 git clone https://github.com/HANK572718/simple_license_manager.git
-poetry self add your_path # 路徑要使用絕對路徑
+poetry self add ./simple_license_manager
 ```
 
-> 本機修改後重新執行 `poetry self add your_path` 即可更新。
+> ⚠️ **Windows 跨磁碟注意**：若 Poetry 安裝在 C: 而專案在 D:，`poetry self add ./local_path` 可能無法正確登錄套件，請改用方式 A（Git URL）。
+
+---
+
+## 核心概念：金鑰與授權的關係
+
+```
+專案  (1)
+ └── 金鑰對 (1)          ← 一個專案持有一把 RSA-2048 金鑰對
+      ├── 私鑰            → 存於 ~/.licmgr/，只在你的開發機，用來「簽發」授權
+      └── 公鑰            → 嵌入 SDK，交給所有客戶，用來「驗證」授權真偽
+           │
+           ├── 授權 #1    → 客戶 A 的機器（指紋 aaaa...）
+           ├── 授權 #2    → 客戶 B 的機器（指紋 bbbb...）
+           └── 授權 #3    → 客戶 A 的第二台機器（指紋 cccc...）
+```
+
+- **金鑰對只需產生一次**，之後可以一直用它為新客戶簽發授權
+- **每張授權綁定一個機器指紋**，搬到其他機器即自動失效
+- **公鑰可以安全公開**，無法用來偽造授權（只有私鑰能簽章）
 
 ---
 
@@ -42,11 +78,13 @@ licmgr
 ╰────────────────────────────────────╯
 
 ? 主選單
-  > 📁  專案管理
-    🔑  金鑰管理
-    📄  授權管理
-    📦  SDK 匯出
-    ⚙   設定
+  > 📁  專案管理      — 建立 / 列出專案
+    🔑  金鑰管理      — 產生 RSA 金鑰對（一個專案一把）
+    📄  授權管理      — 簽發 / 撤銷 / 匯出授權（一台機器一份）
+    📦  SDK 匯出      — 匯出含公鑰的驗證整合包
+    📥  匯入舊資料庫  — 從舊 licmgr DB 匯入紀錄
+    ⚙   設定          — 修改路徑設定
+    ❓  說明          — 功能介紹與概念說明
     🚪  離開
 ```
 
