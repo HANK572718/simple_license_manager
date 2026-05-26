@@ -1,4 +1,4 @@
-"""RSA-2048 key pair generation for rich_deploy projects."""
+"""RSA-2048 key pair generation for licmg projects."""
 
 import hashlib
 from pathlib import Path

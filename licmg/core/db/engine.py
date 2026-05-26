@@ -1,18 +1,18 @@
-"""SQLAlchemy engine and session factory for rich_deploy.
+"""SQLAlchemy engine and session factory for licmg.
 
 Data storage design
 -------------------
-Private keys and the registry database are stored in ``~/.ssh/rich_deploy/``
+Private keys and the registry database are stored in ``~/.licmg/``
 so they survive across:
   - git commits / pushes (directory is outside the repo)
-  - ``poetry self remove rich-deploy`` (user home is unaffected)
+  - ``poetry self remove licmg`` (user home is unaffected)
   - Project directory moves or renames
 
 Config resolution order (evaluated at first DB call, not at import):
-  1. ``database.url`` in ``rich_deploy.toml`` found in the current working directory
-  2. Built-in default: ``~/.ssh/rich_deploy/registry.db``
+  1. ``database.url`` in ``licmg.toml`` found in the current working directory
+  2. Built-in default: ``~/.licmg/registry.db``
 
-The ``.ssh`` directory is chosen because it is:
+The ``~/.licmg`` directory is:
   - Protected by OS permissions (chmod 700 on POSIX)
   - Never committed to version control
   - Not cleaned up by package managers
@@ -34,23 +34,23 @@ else:
 
 from .models import Base
 
-_CONFIG_FILENAME = "rich_deploy.toml"
+_CONFIG_FILENAME = "licmg.toml"
 
 # Global safe data root — survives plugin reinstalls and git operations
-RICH_DEPLOY_DATA_DIR: Path = Path.home() / ".ssh" / "rich_deploy"
+LICMG_DATA_DIR: Path = Path.home() / ".licmg"
 
 _engine = None
 
 
 def _get_default_db_url() -> str:
     """Return the default SQLite URL pointing to the user's safe data directory."""
-    db_path = RICH_DEPLOY_DATA_DIR / "registry.db"
+    db_path = LICMG_DATA_DIR / "registry.db"
     # SQLAlchemy accepts forward slashes on all platforms
     return f"sqlite:///{db_path.as_posix()}"
 
 
 def _load_db_url() -> str:
-    """Read the database URL from rich_deploy.toml in cwd, or return the default."""
+    """Read the database URL from licmg.toml in cwd, or return the default."""
     config_path = Path.cwd() / _CONFIG_FILENAME
     if config_path.exists():
         with config_path.open("rb") as f:
@@ -63,10 +63,10 @@ def _load_db_url() -> str:
 
 def _ensure_data_dir() -> None:
     """Create the data directory with restrictive permissions if it doesn't exist."""
-    RICH_DEPLOY_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LICMG_DATA_DIR.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":  # POSIX only: restrict to owner read/write/execute
         try:
-            os.chmod(RICH_DEPLOY_DATA_DIR, stat.S_IRWXU)
+            os.chmod(LICMG_DATA_DIR, stat.S_IRWXU)
         except OSError:
             pass
 

@@ -9,8 +9,8 @@ from rich.table import Table
 from cleo.commands.command import Command
 from cleo.helpers import argument, option
 
-from rich_deploy.core.db.crud import create_project, get_project, list_projects
-from rich_deploy.core.db.engine import init_db
+from licmg.core.db.crud import create_project, get_project, list_projects
+from licmg.core.db.engine import init_db
 
 
 def _run_git(*args: str, cwd: Path | None = None) -> str:
@@ -47,7 +47,7 @@ def detect_git_context() -> dict[str, str | None]:
 
 
 class ProjectCreateCommand(Command):
-    """Create a new project in the rich_deploy registry."""
+    """Create a new project in the licmg registry."""
 
     name = "project create"
     description = "Create a new project in the registry"
@@ -105,7 +105,7 @@ class ProjectCreateCommand(Command):
 
 
 class ProjectListCommand(Command):
-    """List all projects in the rich_deploy registry."""
+    """List all projects in the licmg registry."""
 
     name = "project list"
     description = "List all registered projects"

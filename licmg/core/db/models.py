@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for rich_deploy."""
+"""SQLAlchemy ORM models for licmg."""
 
 from datetime import datetime
 

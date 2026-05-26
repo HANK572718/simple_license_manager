@@ -10,7 +10,7 @@ from rich.table import Table
 from cleo.commands.command import Command
 from cleo.helpers import argument, option
 
-from rich_deploy.core.db.crud import (
+from licmg.core.db.crud import (
     create_license,
     get_active_key,
     get_license,
@@ -19,8 +19,8 @@ from rich_deploy.core.db.crud import (
     revoke_license,
     update_license_file_path,
 )
-from rich_deploy.core.db.engine import init_db
-from rich_deploy.core.sign_license import sign
+from licmg.core.db.engine import init_db
+from licmg.core.sign_license import sign
 
 
 class LicenseIssueCommand(Command):
