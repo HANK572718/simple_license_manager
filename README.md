@@ -3,7 +3,136 @@
 本工具實作一套**私鑰永不離開開發機**的軟體授權流程。
 整個流程透過 CLI 的複製貼上完成，不需要網路連線，不需要在甲方機器上放置任何秘密。
 
-支援平台：**Windows · Linux · macOS**
+支援平台：**Windows · Linux · macOS**  
+授權：Apache 2.0
+
+---
+
+## 安裝方式（二擇一）
+
+### 方式 A — 作為 Poetry Plugin 使用（推薦用於 CI/CD）
+
+安裝至 Poetry 自身環境，全域可用：
+
+```bash
+poetry self add rich-deploy
+```
+
+之後在 `rich_deploy` 專案目錄下執行：
+
+```bash
+poetry rd project list
+poetry rd key generate MY_PROJ
+poetry rd license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires 2027-12-31
+poetry rd sdk export MY_PROJ
+```
+
+### 方式 B — 作為獨立 CLI 安裝
+
+```bash
+pip install rich-deploy
+# 或在目標專案中：
+poetry add rich-deploy
+```
+
+安裝後全域可用：
+
+```bash
+rich-deploy project list
+rich-deploy key generate MY_PROJ
+rich-deploy license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires 2027-12-31
+rich-deploy sdk export MY_PROJ
+```
+
+---
+
+## CLI 命令速查
+
+```
+project create <id> <display-name> <env-prefix>   建立新專案
+project list                                        列出所有專案
+
+key generate <project-id>                           產生 RSA-2048 金鑰對
+key list     <project-id>                           列出金鑰版本
+key show     <project-id>                           顯示公鑰 PEM
+
+license issue  <project-id> <fingerprint>           簽發授權
+  --client / -c  "Acme Corp"                        客戶名稱
+  --expires / -e YYYY-MM-DD                         到期日（省略=永久）
+  --mac / -m     aa:bb:cc:dd:ee:ff                  MAC 位址（審計用）
+  --output / -o  /path/to/out.lic                   輸出路徑
+
+license list   <project-id>                         列出所有授權記錄
+license export <license-id>  [--output PATH]        匯出 .lic 檔案
+license revoke <license-id>                         撤銷授權
+
+sdk export     <project-id>  [--output DIR]         匯出客戶端 SDK
+  --no-guide                                        不附帶整合說明文件
+```
+
+所有命令在 **Poetry plugin 模式**下加上 `rd ` 前綴：
+`rich-deploy license issue` → `poetry rd license issue`
+
+---
+
+## 資料儲存位置
+
+私鑰和資料庫預設存放於使用者主目錄的 `.ssh/rich_deploy/`：
+
+```
+~/.ssh/rich_deploy/
+├── registry.db              # 授權登錄資料庫（SQLite）
+└── projects/
+    └── <project-id>/
+        └── keys/
+            ├── private_key_v1.pem   # 私鑰（只有擁有者可讀）
+            └── public_key_v1.pem
+```
+
+選擇 `.ssh` 目錄的原因：
+- OS 層級存取限制（Linux/macOS 預設 chmod 700）
+- 不在任何 git repo 內 — 永遠不會被 commit
+- Plugin 移除（`poetry self remove`）不影響此目錄
+- 專案目錄搬移或重命名不影響資料
+
+`.lic` 授權檔（交付給客戶的）預設儲存在工作目錄的 `projects/<id>/licenses/`，
+方便直接傳遞給客戶，不含任何敏感資訊。
+
+### 自訂 DB 路徑
+
+在工作目錄放置 `rich_deploy.toml`：
+
+```toml
+[database]
+url = "sqlite:////absolute/path/to/registry.db"
+```
+
+---
+
+## 典型 CI/CD 工作流程
+
+```yaml
+# .github/workflows/issue-license.yml
+- name: Issue license
+  run: |
+    poetry rd license issue $PROJECT_ID $FINGERPRINT \
+      --client "$CLIENT_NAME" \
+      --expires "$EXPIRY_DATE" \
+      --output artifacts/license.lic
+```
+
+---
+
+## 本機互動式 TUI（開發者用）
+
+若你 clone 了這個 repo，仍可使用原來的互動式選單（無需安裝為 plugin）：
+
+```bash
+poetry install
+poetry run python tools/main.py
+```
+
+選單提供：專案管理 / 金鑰管理 / 授權管理 / SDK 匯出，操作與 CLI 命令功能相同。
 
 ---
 
@@ -221,76 +350,44 @@ RSA-2048  +  PKCS#1 v1.5 padding  +  SHA-256 hash
 # 虛擬碼，完整實作見 client_sdk/get_fingerprint.py
 
 parts = []
-parts.append(f"mac:{MAC 位址}")           # 所有平台
 parts.append(f"wguid:{MachineGuid}")      # 僅 Windows
 parts.append(f"mid:{machine-id}")         # 僅 Linux
 parts.append(f"ioplatform:{PlatformUUID}")# 僅 macOS
+parts.append(f"biosuuid:{BIOS_UUID}")     # 所有平台（需 root/Admin）
 
 raw = "|".join(sorted(parts))             # 排序後拼接，確保順序一致
 fingerprint = sha256(raw).hexdigest()     # 64 個 hex 字元
 ```
 
-`sorted()` 是關鍵：確保不論收集順序，相同的硬體資訊永遠產生相同的指紋。
+MAC 位址**刻意排除**在指紋之外（只作為審計紀錄），
+避免 NIC 更換或 VM 重建後授權失效。
 
 ### 各識別碼詳細說明
 
-#### MAC 位址（`uuid.getnode()`）
-
-- **來源**：網路介面卡的硬體位址
-- **格式**：`mac:aabbccddeeff`（12 位 hex）
-- **穩定性**：★★★☆☆
-- **注意**：
-  - 更換網卡、停用網卡、更改 MAC 位址（MAC spoofing）都會改變
-  - 部分筆電每次開機會隨機化 Wi-Fi MAC（需確認 BIOS 設定）
-  - 若 `uuid.getnode()` 回傳 `0` 或 `2^48-1`（無效值），腳本會忽略此項
-
 #### Windows MachineGuid（`winreg`）
 
-- **來源**：登錄機碼 `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography\MachineGuid`
-- **格式**：`wguid:{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`（UUID 格式）
+- **來源**：`HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography\MachineGuid`
 - **穩定性**：★★★★☆
-- **何時改變**：
-  - 重新安裝 Windows（包含重設這台電腦）
-  - 使用 `sysprep /generalize` 準備系統映像
-  - 部分系統備份還原工具
-- **何時不變**：一般 Windows Update、驅動程式更新、BIOS 更新
+- **何時改變**：重新安裝 Windows、sysprep
 
 #### Linux machine-id（`/etc/machine-id`）
 
-- **來源**：`/etc/machine-id` 或 `/var/lib/dbus/machine-id`
-- **格式**：`mid:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`（32 位 hex）
 - **穩定性**：★★★★☆
-- **何時改變**：
-  - 重新安裝 Linux
-  - 手動執行 `systemd-machine-id-setup --commit`
-  - 複製虛擬機映像（clone）後執行 `systemd-machine-id-setup`
-- **何時不變**：一般 OS 升級、套件更新、核心更新
+- **何時改變**：重新安裝 Linux、clone VM 後手動重置
 
 #### macOS IOPlatformUUID（`ioreg`）
 
-- **來源**：`ioreg -rd1 -c IOPlatformExpertDevice` 輸出的 `IOPlatformUUID` 欄位
-- **格式**：`ioplatform:XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`（UUID 格式）
 - **穩定性**：★★★★★
-- **何時改變**：
-  - 更換主機板（邏輯板）
-  - 全新安裝 macOS（erase install）
-  - 少數機型在 Apple Silicon 重新啟用時
-- **何時不變**：macOS 系統升級（Ventura → Sonoma 等）、重新啟動、軟體更新、Time Machine 還原
-
-> IOPlatformUUID 是 macOS 上等同 Windows MachineGuid 的硬體識別碼，穩定性最高，是三個平台中唯一達到五星的識別碼。
+- **何時改變**：更換主機板、全新安裝 macOS
 
 ### 指紋穩定性總結
 
-| 操作 | MAC | MachineGuid（Win） | machine-id（Linux） | IOPlatformUUID（macOS） |
-|------|-----|--------------------|---------------------|------------------------|
-| 一般軟體 / OS 更新 | 不變 | 不變 | 不變 | 不變 |
-| 重裝作業系統 | 不變 | **改變** | **改變** | **改變** |
-| 更換網卡 | **改變** | 不變 | 不變 | 不變 |
-| 修改 MAC 位址 | **改變** | 不變 | 不變 | 不變 |
-| 重新啟動 | 不變 | 不變 | 不變 | 不變 |
-| BIOS / 韌體更新 | 不變 | 不變 | 不變 | 不變 |
-| 磁碟擴充 / 分割 | 不變 | 不變 | 不變 | 不變 |
-| 更換主機板 | 可能改變 | **改變** | 不變 | **改變** |
+| 操作 | MachineGuid（Win） | machine-id（Linux） | IOPlatformUUID（macOS） |
+|------|--------------------|--------------------|------------------------|
+| 一般 OS 更新 | 不變 | 不變 | 不變 |
+| 重裝作業系統 | **改變** | **改變** | **改變** |
+| 更換網卡 | 不變 | 不變 | 不變 |
+| BIOS / 韌體更新 | 不變 | 不變 | 不變 |
 
 ---
 
@@ -298,27 +395,23 @@ fingerprint = sha256(raw).hexdigest()     # 64 個 hex 字元
 
 ### 支援矩陣
 
-| 平台 | 可取得指紋 | 使用的識別碼 | 穩定性評估 |
-|------|-----------|-------------|-----------|
-| Windows 10/11 | ✅ | MAC + MachineGuid | 高 |
-| Windows Server 2016+ | ✅ | MAC + MachineGuid | 高 |
-| Ubuntu / Debian | ✅ | MAC + machine-id | 高 |
-| CentOS / RHEL | ✅ | MAC + machine-id | 高 |
-| Arch Linux | ✅ | MAC + machine-id | 高 |
-| macOS 12 Monterey+ | ✅ | MAC + IOPlatformUUID | 高 |
-| macOS 11 Big Sur | ✅ | MAC + IOPlatformUUID | 高 |
-| WSL2 (Windows 內) | ⚠️ 部分 | MAC（虛擬）+ machine-id | 低（每次可能不同） |
-| Alpine Linux | ✅ | MAC + machine-id | 高（需安裝 `util-linux`） |
+| 平台 | 可取得指紋 | 穩定性評估 |
+|------|-----------|-----------|
+| Windows 10/11 | ✅ | 高 |
+| Ubuntu / Debian | ✅ | 高 |
+| CentOS / RHEL | ✅ | 高 |
+| macOS 12 Monterey+ | ✅ | 高 |
+| WSL2 (Windows 內) | ⚠️ 部分 | 低 |
 
 ### Python 版本相容性
 
-| Python 版本 | 支援 | 備註 |
-|-------------|------|------|
-| 3.10 | ✅ | 最低支援版本 |
-| 3.11 | ✅ | |
-| 3.12 | ✅ | |
-| 3.13 | ✅ | |
-| 3.9 以下 | ❌ | `str \| None` 型別語法不支援 |
+| Python 版本 | 支援 |
+|-------------|------|
+| 3.10 | ✅ |
+| 3.11 | ✅ |
+| 3.12 | ✅ |
+| 3.13 | ✅ |
+| 3.9 以下 | ❌ |
 
 `get_fingerprint.py`（給甲方的版本）**只使用標準函式庫**，不需要安裝任何第三方套件。
 
@@ -332,19 +425,11 @@ fingerprint = sha256(raw).hexdigest()     # 64 個 hex 字元
 適用程度：⚠️ 有條件適用
 ```
 
-虛擬機可以產生指紋，但需要注意以下行為：
-
 | 情境 | 指紋是否穩定 |
 |------|-------------|
 | 正常開關機 | **穩定** |
-| 快照還原（Snapshot Revert） | **改變**（machine-id 可能被還原至舊值） |
-| 複製 VM（Clone） | **改變**（machine-id 相同，但 clone 後應重新生成） |
-| 即時遷移（Live Migration） | **視設定而定**（MAC 若固定則不變） |
-| 重新部署（Re-provision） | **改變** |
-
-**建議做法：**
-- 在 VMware / VirtualBox 設定中**固定 MAC 位址**（不要使用隨機產生）
-- 避免對已授權的 VM 執行複製，若需複製應重新申請授權
+| 快照還原 | **改變** |
+| 複製 VM | **改變** |
 
 ### Docker 容器
 
@@ -352,53 +437,13 @@ fingerprint = sha256(raw).hexdigest()     # 64 個 hex 字元
 適用程度：❌ 不建議用於容器本身
 ```
 
-Docker 容器的識別碼極不穩定：
-
-| 識別碼 | 容器內行為 |
-|--------|-----------|
-| MAC 位址 | 每次 `docker run` 預設隨機產生 |
-| machine-id | 繼承自宿主機，或每次重建後不同 |
-| 容器 ID | 每次重啟後改變 |
-
-**結論：** 若你的程式跑在容器裡，授權應綁定**宿主機**而非容器：
-
-```
-正確做法：
-  宿主機執行 get_fingerprint.py  →  取得宿主機指紋
-  授權檔掛載進容器（volume mount）
-  容器內程式讀取授權檔時，
-    比對的是「宿主機指紋」而非容器自身的網路介面
-```
-
-若必須在容器內驗證，可改用固定 MAC 的方式啟動：
-
-```bash
-docker run --mac-address 02:42:ac:11:00:02 your-image
-```
-
-但這等同於由部署者自行設定指紋來源，安全性需另行評估。
+建議授權綁定**宿主機**，授權檔以 volume mount 掛入容器。
 
 ### Kubernetes Pod
 
 ```
 適用程度：❌ 不適用（Pod 是無狀態的）
 ```
-
-Kubernetes Pod 本質上是可替換的無狀態單元，MAC 位址和 machine-id 每次調度都可能不同。
-若需要在 K8s 環境授權，建議改用**節點（Node）層級的識別碼**或整合 K8s 的 Secret 機制。
-
-### WSL2
-
-```
-適用程度：⚠️ 僅限開發測試
-```
-
-WSL2 是一個在 Hyper-V 虛擬機上跑的 Linux，其識別碼行為：
-
-- `machine-id`：每次 WSL2 執行個體重建後可能改變
-- MAC 位址：虛擬網路介面，重啟 WSL2 服務後可能改變
-
-不建議將 WSL2 環境作為需要穩定授權的部署目標。
 
 ---
 
@@ -407,68 +452,50 @@ WSL2 是一個在 Hyper-V 虛擬機上跑的 Linux，其識別碼行為：
 ```
 rich_deploy/
 │
-├── client_sdk/
-│   ├── get_fingerprint.py     ← 給甲方執行，不含任何秘密，可自由散布
-│   ├── verify_license.py      ← 三道關卡驗證，部署前替換 PUBLIC_KEY_PEM
-│   └── bootstrap.py           ← 雙模式：開發機測試 / 客戶部署精靈
+├── client_sdk/                ← 給甲方的工具（零依賴）
+│   ├── get_fingerprint.py
+│   ├── verify_license.py
+│   └── bootstrap.py
 │
-├── tools/
+├── tools/                     ← 開發機工具（互動式 TUI）
 │   ├── db/
-│   │   ├── __init__.py
-│   │   ├── models.py          ← SQLAlchemy ORM（Project / Key / License）
-│   │   ├── engine.py          ← DB engine + Session 工廠
-│   │   └── crud.py            ← 所有 CRUD 操作
-│   ├── main.py                ← Master CLI 入口
-│   ├── cmd_project.py         ← 專案管理指令
-│   ├── cmd_keys.py            ← 金鑰管理指令
-│   ├── cmd_license.py         ← 授權管理指令
-│   ├── generate_keys.py       ← 一次性產生單組 RSA 金鑰對
-│   ├── sign_license.py        ← CLI 直接簽章腳本
-│   ├── private_key.pem        ← 私鑰，已加入 .gitignore，絕不提交
-│   └── public_key.pem         ← 公鑰，可隨程式一起發布
+│   │   ├── models.py
+│   │   ├── engine.py
+│   │   └── crud.py
+│   ├── main.py
+│   ├── cmd_*.py
+│   ├── sign_license.py
+│   └── generate_keys.py
 │
-├── projects/                  ← 各專案私鑰實體檔案（.gitignore 忽略私鑰）
-│   └── NHAD/
-│       └── keys/
-│           └── public_key_v1.pem
+├── rich_deploy/               ← Poetry plugin / 獨立 CLI 套件
+│   ├── __init__.py
+│   ├── plugin.py              ← ApplicationPlugin（poetry rd ...）
+│   ├── cli.py                 ← 獨立 CLI 入口（rich-deploy ...）
+│   ├── commands/              ← Cleo 命令（project / key / license / sdk）
+│   │   ├── project.py
+│   │   ├── key.py
+│   │   ├── license.py
+│   │   └── sdk.py
+│   ├── core/                  ← 核心邏輯（DB、簽章、金鑰生成）
+│   │   ├── db/
+│   │   │   ├── models.py
+│   │   │   ├── engine.py
+│   │   │   └── crud.py
+│   │   ├── sign_license.py
+│   │   └── generate_keys.py
+│   └── data/
+│       └── client_sdk/        ← SDK 匯出模板
 │
 ├── db/
 │   └── registry.db            ← SQLite 主檔（.gitignore 忽略）
 │
-├── docs/
-│   ├── design_discussion_summary.md
-│   ├── six_hats_analysis.md
-│   ├── tpm_trends_and_integration.md
-│   └── dongle_architecture.md
+├── projects/                  ← 各專案私鑰（.gitignore 忽略私鑰）
 │
-├── rich_deploy.toml           ← 全域設定（DB URL、預設值）
-├── .gitignore
+├── docs/
+├── rich_deploy.toml           ← 全域設定（DB URL）
 ├── pyproject.toml
+├── LICENSE                    ← Apache 2.0
 └── README.md
-```
-
-### 資料流總覽
-
-```
-DB（registry.db）= 定義層
-  Project / Key / License 台帳，是一切的唯一來源
-
-檔案 = 副產物
-  *.pem  金鑰檔（可從 DB 重建公鑰，私鑰需獨立備份）
-  *.lic  授權檔（可從 DB 的 license_json 重建）
-```
-
-### 各腳本的依賴關係
-
-```
-get_fingerprint.py          verify_license.py       sign_license.py
-────────────────────        ──────────────────────  ──────────────────
-標準函式庫只：              cryptography            cryptography
-  hashlib                   get_fingerprint         sqlalchemy（透過 DB）
-  platform                  （自動匯入）
-  uuid
-  winreg（Windows）
-  pathlib
 ```
 
 ---
@@ -478,7 +505,7 @@ get_fingerprint.py          verify_license.py       sign_license.py
 | 項目 | 版本 |
 |------|------|
 | Python | 3.10 以上 |
-| Poetry | 最新版 |
+| Poetry | 1.8 以上（plugin 模式需要） |
 
 ### 安裝 Poetry（若尚未安裝）
 
@@ -486,13 +513,10 @@ get_fingerprint.py          verify_license.py       sign_license.py
 curl -sSL https://install.python-poetry.org | python3 -
 ```
 
-### 安裝專案依賴
+### 安裝專案依賴（本地開發）
 
 ```bash
-# 確認虛擬環境建在專案目錄內
 poetry config virtualenvs.in-project true
-
-# 安裝所有依賴
 poetry install
 ```
 
@@ -502,194 +526,74 @@ poetry install
 
 ### 第零步：初始化金鑰（只做一次）
 
-> 僅在**你的開發機**上執行，甲方機器跳過此步驟。
-
 ```bash
-poetry run python tools/generate_keys.py
+# 互動式
+poetry run python tools/main.py
+# 選 [p] 新增專案，[k] 產生金鑰
+
+# 或直接 CLI
+rich-deploy project create MY_PROJ "My Project" MYPROJ
+rich-deploy key generate MY_PROJ
 ```
-
-輸出：
-
-```
-金鑰已生成：
-  私鑰 → .../tools/private_key.pem
-  公鑰 → .../tools/public_key.pem
-警告：私鑰絕對不可提交至版本控制！
-```
-
-- `private_key.pem`：絕對保密，已加入 `.gitignore`
-- `public_key.pem`：可隨你的應用程式一起發布，用於驗證授權
-
-若私鑰已存在，腳本會自動跳過，不會覆蓋。
 
 ---
 
 ### 第一步：在甲方機器取得指紋
 
-在**甲方機器**上執行（只需要 Python，不需要安裝 Poetry 或任何套件）：
+在**甲方機器**上執行（只需要 Python，無需 Poetry）：
 
 ```bash
-python client_sdk/get_fingerprint.py
+python get_fingerprint.py
 ```
 
-輸出範例：
-
-```
-============================================================
-請複製以下指紋字串，傳給授權方：
-============================================================
-cd668926847b3b7f31545a26284a66c117ccbfb7080a1882779765a0e8761a9a
-============================================================
-```
-
-將這串 64 個字元的指紋複製起來，透過任何方式（訊息、email）傳給你自己。
+複製印出的 64 字元指紋。
 
 ---
 
 ### 第二步：在開發機簽章，產生授權檔
 
-在**你的開發機**上執行：
-
 ```bash
-# 基本用法（永久授權）
-poetry run python tools/sign_license.py <貼上指紋>
+# 互動式 TUI
+poetry run python tools/main.py  # [l] 簽發授權
 
-# 加上到期日
-poetry run python tools/sign_license.py <貼上指紋> --expires 2027-12-31
+# CLI（適合 CI/CD）
+rich-deploy license issue MY_PROJ <指紋> --client "Acme Corp" --expires 2027-12-31
+# 或 poetry plugin：
+poetry rd license issue MY_PROJ <指紋> --client "Acme Corp" --expires 2027-12-31
 ```
-
-實際範例：
-
-```bash
-poetry run python tools/sign_license.py cd668926847b3b7f31545a26284a66c117ccbfb7080a1882779765a0e8761a9a --expires 2027-12-31
-```
-
-輸出範例：
-
-```
-============================================================
-請複製以下內容，在甲方機器上存成 license.lic：
-============================================================
-{
-  "fingerprint": "cd668926847b3b7f31545a26284a66c117ccbfb7080a1882779765a0e8761a9a",
-  "signature": "RcJz7VX8YbW/WQqAKGvk...(base64)...",
-  "note": "此授權僅限本機使用",
-  "expires": "2027-12-31"
-}
-============================================================
-```
-
-將 `{...}` 整段 JSON 複製起來，傳回給甲方。
 
 ---
 
 ### 第三步：甲方存檔並啟動
 
-1. 新增純文字檔，命名為 `license.lic`，貼入 JSON 內容並儲存
-2. 設定環境變數，告訴程式授權檔的位置：
+將收到的 JSON 存成 `license.lic`，設定環境變數後啟動程式：
 
-   **Windows（PowerShell）**
-   ```powershell
-   $env:NHAD_LICENSE_FILE = "C:\path\to\license.lic"
-   ```
-
-   **Windows（命令提示字元）**
-   ```cmd
-   set NHAD_LICENSE_FILE=C:\path\to\license.lic
-   ```
-
-   **Linux / macOS**
-   ```bash
-   export NHAD_LICENSE_FILE=/path/to/license.lic
-   ```
-
-3. 啟動程式，驗證通過後即可正常使用。
+```bash
+export MYPROJ_LICENSE_FILE=/path/to/license.lic
+```
 
 ---
 
 ## 9. 授權驗證實作範例
 
-以下是你的應用程式端（甲方機器上執行）需要自行實作的驗證邏輯範例：
-
 ```python
-# verify_license.py — 整合進你的應用程式
-import base64
-import json
-import os
-import sys
-from datetime import date
-from pathlib import Path
+# 整合進你的應用程式（使用 sdk export 匯出的 verify_license.py）
+from verify_license import verify_license
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
-from cryptography.hazmat.primitives.hashes import SHA256
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
-
-# 公鑰直接嵌入程式碼，或從檔案讀取
-_PUBLIC_KEY_PEM = (Path(__file__).parent / "public_key.pem").read_bytes()
-
-
-def _current_fingerprint() -> str:
-    """重新計算本機指紋（邏輯必須與 get_fingerprint.py 完全一致）。"""
-    # ... 與 get_fingerprint.py 相同的邏輯 ...
-
-
-def verify_license(license_path: str) -> bool:
-    """Return True if the license is valid for this machine, False otherwise."""
-    try:
-        data = json.loads(Path(license_path).read_text())
-        fingerprint = data["fingerprint"]
-        signature   = base64.b64decode(data["signature"])
-        expires     = data.get("expires")
-
-        # ① 確認指紋符合本機
-        if fingerprint != _current_fingerprint():
-            return False
-
-        # ② 確認尚未到期
-        if expires and date.fromisoformat(expires) < date.today():
-            return False
-
-        # ③ 驗證簽章
-        payload = fingerprint
-        if expires:
-            payload = f"{fingerprint}|expires:{expires}"
-
-        public_key = load_pem_public_key(_PUBLIC_KEY_PEM)
-        public_key.verify(signature, payload.encode(), PKCS1v15(), SHA256())
-
-        return True
-
-    except (InvalidSignature, KeyError, ValueError, FileNotFoundError):
-        return False
-
-
-if __name__ == "__main__":
-    lic = os.environ.get("NHAD_LICENSE_FILE", "license.lic")
-    if verify_license(lic):
-        print("授權驗證通過 ✓")
-    else:
-        print("授權無效或已過期 ✗")
-        sys.exit(1)
+if not verify_license():
+    print("授權無效，請聯繫授權方")
+    sys.exit(1)
 ```
 
-### 驗證三道關卡說明
+驗證三道關卡：
 
 ```
-關卡一：指紋比對
-  現場計算 == license.lic 的 fingerprint？
-  → 不符：此授權不屬於這台機器
-
-關卡二：到期日
-  今天 <= expires？（若有 expires 欄位）
-  → 不符：授權已過期
-
-關卡三：簽章驗證
-  用公鑰驗證 signature 是否由私鑰簽出？
-  → 不符：授權檔被竄改，或是偽造的
+關卡一：指紋比對  — 此授權是否屬於這台機器？
+關卡二：到期日    — 授權是否仍在有效期內？
+關卡三：RSA 簽章  — 授權是否由合法私鑰簽發？
 ```
 
-三關全過才算授權合法。攻擊者若修改 `fingerprint` 欄位，簽章驗證必然失敗；若修改 `expires`，簽章驗證同樣失敗（因為 payload 包含 expires）。
+三關全過才算授權合法。
 
 ---
 
@@ -697,7 +601,7 @@ if __name__ == "__main__":
 
 | 資產 | 位置 | 保護方式 |
 |------|------|----------|
-| `private_key.pem` | 開發機 `tools/` | `.gitignore` 排除，永不傳輸 |
+| `private_key.pem` | 開發機 `projects/` | `.gitignore` 排除，永不傳輸 |
 | `public_key.pem` | 可公開散布 | 只能驗證，無法偽造簽章 |
 | `license.lic` | 甲方機器 | 綁定硬體指紋，換機即失效 |
 | 指紋字串 | 傳輸過程 | 單向雜湊，無法還原原始硬體資訊 |
@@ -708,16 +612,10 @@ if __name__ == "__main__":
 |---------|---------|------|
 | 複製 license.lic 到其他機器 | ❌ | 指紋不符，關卡一失敗 |
 | 修改 license.lic 的 fingerprint | ❌ | 簽章驗證失敗，關卡三失敗 |
-| 修改 license.lic 的 expires | ❌ | expires 包含在簽章 payload 中，關卡三失敗 |
-| 偽造 license.lic（無私鑰） | ❌ | RSA-2048 無法在沒有私鑰的情況下偽造簽章 |
-| 取得私鑰後偽造 | ✅ | 私鑰安全是整個系統的根本，需妥善保管 |
-| MAC 位址偽造（MAC Spoofing） | ⚠️ | 可使指紋符合，但需同時知道 MachineGuid / machine-id / IOPlatformUUID |
-
-### 已知限制
-
-1. **無撤銷機制**：目前沒有 CRL（憑證撤銷列表）。若需要提前終止授權，只能更換金鑰對並要求甲方重新安裝。
-2. **單向依賴標準函式庫**：指紋腳本設計為零依賴，但這也表示各作業系統採集到的欄位數量不同，穩定性略有差異。
-3. **時鐘竄改**：到期日依賴系統時鐘，有心人可撥回時間繞過。若要強化，可在驗證時要求連線對時，但這會喪失離線特性。
+| 修改 license.lic 的 expires | ❌ | expires 包含在簽章 payload 中 |
+| 偽造 license.lic（無私鑰） | ❌ | RSA-2048 無法在沒有私鑰的情況下偽造 |
+| 從 .lic 反推私鑰 | ❌ | RSA 單向性，數學上不可行 |
+| 取得私鑰後偽造 | ✅ | 私鑰安全是整個系統的根本 |
 
 ---
 
@@ -726,212 +624,34 @@ if __name__ == "__main__":
 ### Q：指紋腳本在甲方機器上需要安裝什麼？
 
 只需要 Python 3.10 以上，不需要安裝任何第三方套件。
-`get_fingerprint.py` 只使用 Python 標準函式庫。
-
-### Q：指紋會不會因重裝 Windows 而改變？
-
-會。重灌系統後 MachineGuid 會重新產生，需要重新走一次授權流程。
-一般的軟體更新、驅動程式安裝、BIOS 更新則不會改變。
 
 ### Q：私鑰不小心提交了怎麼辦？
 
 立刻視為洩漏：
-1. 執行 `generate_keys.py` 重新生成一組全新的金鑰對
-2. 以 git 歷史清理工具（如 `git filter-repo`）移除含私鑰的 commit
-3. 通知所有持有舊授權的甲方，重新走一次授權流程
+1. 執行 `rich-deploy key generate MY_PROJ` 重新生成金鑰
+2. 以 `git filter-repo` 移除含私鑰的 commit
+3. 通知所有持有舊授權的甲方重新走授權流程
 
 ### Q：可以同時授權多台機器嗎？
 
-每台機器分別走一次完整流程，各自產生一份 `license.lic`，互不干擾。
+每台機器分別走一次完整流程，各自產生一份 `license.lic`。
 
 ### Q：`--expires` 日期格式？
 
 ISO 8601 格式：`YYYY-MM-DD`，例如 `2027-12-31`。
-驗證邏輯由你的應用程式讀取 `expires` 欄位實作（參考第 9 節的範例）。
-
-### Q：Docker 容器裡可以用嗎？
-
-不建議直接在容器內驗證，原因見第 5 節。
-建議的做法是在宿主機取得指紋，將授權檔以 volume mount 的方式掛入容器。
-
-### Q：macOS 支援嗎？
-
-支援。`get_fingerprint.py` 會自動偵測 macOS（`platform.system() == "Darwin"`），
-並透過 `ioreg` 指令取得 `IOPlatformUUID`，這是 macOS 上最穩定的硬體識別碼，
-穩定性等同 Windows 的 MachineGuid，macOS 系統升級後不會改變。
-
-```
-指紋組成：mac:<位址> + ioplatform:<UUID>
-採集方式：subprocess 執行 ioreg -rd1 -c IOPlatformExpertDevice
-```
-
-`ioreg` 是 macOS 內建指令，無需安裝任何額外軟體。
 
 ---
 
 ## 12. 本機模擬練習
 
-本機模擬分兩種方式：**自動模擬**（一行指令）和**手動逐步**（學習用）。
-
----
-
-### 方式 A：自動模擬（推薦，30 秒完成）
-
-`bootstrap.py` 偵測到 `tools/private_key.pem` 存在時，自動進入開發機模式，
-一次跑完四個驗證情境並列表報告結果。
-
-**前置條件：確認金鑰存在**
-
 ```bash
-ls tools/private_key.pem tools/public_key.pem
-```
-
-若找不到，先初始化：
-
-```bash
-poetry run python tools/generate_keys.py
-```
-
-**執行模擬：**
-
-```bash
-poetry run python client_sdk/bootstrap.py
-```
-
-**預期輸出：**
-
-```
-╭──────────────────────────────────────╮
-│  rich_deploy — 開發機模擬測試        │
-╰──────────────────────────────────────╯
-
- 測試項目                結果   說明
- [1/4] 正常授權驗證       ✓     應通過
- [2/4] 竄改指紋 → 關卡一攔截  ✓  符合預期
- [3/4] 過期授權 → 關卡二攔截  ✓  符合預期
- [4/4] 竄改簽章 → 關卡三攔截  ✓  符合預期
-
-全部 4 項測試通過 ✓
-```
-
-四項全綠即表示整個簽章 + 驗證管線正常。
-
----
-
-### 方式 B：手動逐步（了解每個環節）
-
-#### 步驟一：取得本機指紋（模擬甲方）
-
-```bash
-poetry run python client_sdk/get_fingerprint.py
-```
-
-輸出範例：
-
-```
-============================================================
-請複製以下指紋字串，傳給授權方：
-============================================================
-3335b4a38bfd260d6754f6195583a83a4a239d0cbc7370becfb9fa2636468042
-
-（參考用 MAC 位址：dc4546be46c4，不影響授權驗證）
-============================================================
-```
-
-複製那串 64 字元指紋備用。
-
----
-
-#### 步驟二：簽章產生授權檔（模擬開發機）
-
-```bash
-poetry run python tools/sign_license.py <貼上指紋> --expires 2027-12-31 --note "測試客戶"
-```
-
-輸出範例：
-
-```
-============================================================
-請複製以下內容，在甲方機器上存成 license.lic：
-============================================================
-{
-  "fingerprint": "3335b4a3...",
-  "fp_version": 1,
-  "signature": "FtLOY6hO...",
-  "note": "測試客戶",
-  "expires": "2027-12-31"
-}
-============================================================
-```
-
-將整段 JSON 存成 `license.lic`。
-
----
-
-#### 步驟三：驗證授權（模擬甲方）
-
-```bash
-poetry run python client_sdk/verify_license.py license.lic --pubkey tools/public_key.pem
-```
-
-預期輸出：
-
-```
-✓ 授權驗證通過
-```
-
----
-
-#### 步驟四：測試三道防護關卡
-
-**關卡一 — 竄改指紋：** 用編輯器把 `license.lic` 的 `fingerprint` 最後幾字改掉
-
-```
-預期：✗ 關卡一：指紋不符，此授權不屬於本機
-```
-
-**關卡二 — 過期：** 把 `expires` 改成昨天（例如 `"2026-04-18"`）
-
-```
-預期：✗ 關卡二：授權已於 2026-04-18 到期
-```
-
-**關卡三 — 竄改簽章：** 把 `signature` 改成任意字串
-
-```
-預期：✗ 關卡三：簽章驗證失敗
-```
-
----
-
-#### 步驟五：使用 Master CLI 走完整多專案流程（選做）
-
-```bash
-poetry run python tools/main.py
-```
-
-在 CLI 中：
-1. `[p]` → 新增 → 填入專案 ID / 名稱 / 環境變數前綴
-2. `[k]` → 產生金鑰 → 選剛才的專案
-3. `[l]` → 簽發授權 → 貼上指紋 → 設到期日 → 取得 JSON + 寫入 DB
-
----
-
-### 流程速查
-
-```
-# 自動模擬（一行）
+# 自動模擬（30 秒，四個驗證情境）
 poetry run python client_sdk/bootstrap.py
 
 # 手動逐步
-① poetry run python tools/generate_keys.py          ← 初始化（只做一次）
-② poetry run python client_sdk/get_fingerprint.py   ← 取得指紋
-③ poetry run python tools/sign_license.py <指紋> --expires YYYY-MM-DD
-                                                     ← 產生授權 JSON
-④ 將 JSON 存成 license.lic
-⑤ poetry run python client_sdk/verify_license.py license.lic --pubkey tools/public_key.pem
-                                                     ← 驗證通過即完成
-
-# Master CLI（多專案管理）
-poetry run python tools/main.py
+rich-deploy project create DEMO "Demo" DEMO
+rich-deploy key generate DEMO
+python client_sdk/get_fingerprint.py          # 取得指紋
+rich-deploy license issue DEMO <指紋> --client "Test" --expires 2027-12-31
+rich-deploy sdk export DEMO                   # 匯出 SDK 給甲方
 ```
