@@ -19,6 +19,9 @@ db/*.db
 *.lic
 projects/*/licenses/*.lic
 
+# Local delivery staging area (generated per-run, not source)
+projects/
+
 # Exported SDK (generated artifacts)
 dist/
 

@@ -1,4 +1,6 @@
-# rich-deploy — 離線授權工具
+# licmg — 離線授權工具
+
+> **套件名稱**：`licmg`　**GitHub**：[HANK572718/simple_license_manager](https://github.com/HANK572718/simple_license_manager)
 
 本工具實作一套**私鑰永不離開開發機**的軟體授權流程。
 整個流程透過 CLI 的複製貼上完成，不需要網路連線，不需要在甲方機器上放置任何秘密。
@@ -10,39 +12,33 @@
 
 ## 安裝方式（二擇一）
 
-### 方式 A — 作為 Poetry Plugin 使用（推薦用於 CI/CD）
+### 方式 A — 直接從 Git URL 安裝為 Poetry Plugin（推薦）
 
-安裝至 Poetry 自身環境，全域可用：
-
-```bash
-poetry self add rich-deploy
-```
-
-之後在 `rich_deploy` 專案目錄下執行：
+無需 clone，直接一行指令安裝至 Poetry 自身環境：
 
 ```bash
-poetry rd project list
-poetry rd key generate MY_PROJ
-poetry rd license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires 2027-12-31
-poetry rd sdk export MY_PROJ
+poetry self add git+https://github.com/HANK572718/simple_license_manager.git
 ```
 
-### 方式 B — 作為獨立 CLI 安裝
+安裝後即可在任何目錄使用 `poetry lm ...`：
 
 ```bash
-pip install rich-deploy
-# 或在目標專案中：
-poetry add rich-deploy
+poetry lm project list
+poetry lm key generate MY_PROJ
+poetry lm license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires 2027-12-31
+poetry lm sdk export MY_PROJ
 ```
 
-安裝後全域可用：
+### 方式 B — Clone 後安裝本機路徑為 Poetry Plugin
+
+先 clone 整個專案，再以本機路徑安裝為 Plugin：
 
 ```bash
-rich-deploy project list
-rich-deploy key generate MY_PROJ
-rich-deploy license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires 2027-12-31
-rich-deploy sdk export MY_PROJ
+git clone https://github.com/HANK572718/simple_license_manager.git
+poetry self add ./simple_license_manager
 ```
+
+安裝後同樣使用 `poetry lm ...` 命令。本機修改後重新執行 `poetry self add ./simple_license_manager` 即可更新。
 
 ---
 
@@ -50,7 +46,7 @@ rich-deploy sdk export MY_PROJ
 
 ```
 project create <id> <display-name> <env-prefix>   建立新專案
-project list                                        列出所有專案
+project list [-p]                                   列出所有專案（-p 顯示 Git 來源）
 
 key generate <project-id>                           產生 RSA-2048 金鑰對
 key list     <project-id>                           列出金鑰版本
@@ -70,17 +66,21 @@ sdk export     <project-id>  [--output DIR]         匯出客戶端 SDK
   --no-guide                                        不附帶整合說明文件
 ```
 
-所有命令在 **Poetry plugin 模式**下加上 `rd ` 前綴：
-`rich-deploy license issue` → `poetry rd license issue`
+**Poetry plugin 模式**加上 `lm ` 前綴；**獨立 CLI** 直接使用 `licmg`：
+
+| Poetry plugin | 獨立 CLI |
+|---|---|
+| `poetry lm project list` | `licmg project list` |
+| `poetry lm license issue ...` | `licmg license issue ...` |
 
 ---
 
 ## 資料儲存位置
 
-私鑰和資料庫預設存放於使用者主目錄的 `.ssh/rich_deploy/`：
+私鑰和資料庫預設存放於 `~/.licmg/`：
 
 ```
-~/.ssh/rich_deploy/
+~/.licmg/
 ├── registry.db              # 授權登錄資料庫（SQLite）
 └── projects/
     └── <project-id>/
@@ -89,18 +89,18 @@ sdk export     <project-id>  [--output DIR]         匯出客戶端 SDK
             └── public_key_v1.pem
 ```
 
-選擇 `.ssh` 目錄的原因：
-- OS 層級存取限制（Linux/macOS 預設 chmod 700）
+此目錄的特點：
 - 不在任何 git repo 內 — 永遠不會被 commit
-- Plugin 移除（`poetry self remove`）不影響此目錄
+- Plugin 移除（`poetry self remove licmg`）不影響此目錄
 - 專案目錄搬移或重命名不影響資料
+- Linux/macOS：`chmod 700`（OS 層級存取限制）
 
 `.lic` 授權檔（交付給客戶的）預設儲存在工作目錄的 `projects/<id>/licenses/`，
 方便直接傳遞給客戶，不含任何敏感資訊。
 
 ### 自訂 DB 路徑
 
-在工作目錄放置 `rich_deploy.toml`：
+在工作目錄放置 `licmg.toml`：
 
 ```toml
 [database]
@@ -115,7 +115,7 @@ url = "sqlite:////absolute/path/to/registry.db"
 # .github/workflows/issue-license.yml
 - name: Issue license
   run: |
-    poetry rd license issue $PROJECT_ID $FINGERPRINT \
+    poetry lm license issue $PROJECT_ID $FINGERPRINT \
       --client "$CLIENT_NAME" \
       --expires "$EXPIRY_DATE" \
       --output artifacts/license.lic
