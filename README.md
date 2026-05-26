@@ -1,121 +1,155 @@
-# licmg — 離線授權工具
+# licmgr — 離線授權管理工具
 
-> **套件名稱**：`licmg`　**GitHub**：[HANK572718/simple_license_manager](https://github.com/HANK572718/simple_license_manager)
+> **套件名稱**：`licmgr`　**GitHub**：[HANK572718/simple_license_manager](https://github.com/HANK572718/simple_license_manager)  
+> **授權**：Apache 2.0　**平台**：Windows · Linux · macOS
 
-本工具實作一套**私鑰永不離開開發機**的軟體授權流程。
-整個流程透過 CLI 的複製貼上完成，不需要網路連線，不需要在甲方機器上放置任何秘密。
-
-支援平台：**Windows · Linux · macOS**  
-授權：Apache 2.0
+私鑰永不離開開發機的軟體授權系統。透過互動式 TUI 或 Poetry plugin 命令管理專案、金鑰與客戶授權。
 
 ---
 
-## 安裝方式（二擇一）
+## 安裝（二擇一）
 
-### 方式 A — 直接從 Git URL 安裝為 Poetry Plugin（推薦）
-
-無需 clone，直接一行指令安裝至 Poetry 自身環境：
+### 方式 A — 直接從 Git URL 安裝（推薦，無需 clone）
 
 ```bash
 poetry self add git+https://github.com/HANK572718/simple_license_manager.git
 ```
 
-安裝後即可在任何目錄使用 `poetry lm ...`：
-
-```bash
-poetry lm project list
-poetry lm key generate MY_PROJ
-poetry lm license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires 2027-12-31
-poetry lm sdk export MY_PROJ
-```
-
-### 方式 B — Clone 後安裝本機路徑為 Poetry Plugin
-
-先 clone 整個專案，再以本機路徑安裝為 Plugin：
+### 方式 B — Clone 後安裝本機路徑
 
 ```bash
 git clone https://github.com/HANK572718/simple_license_manager.git
 poetry self add ./simple_license_manager
 ```
 
-安裝後同樣使用 `poetry lm ...` 命令。本機修改後重新執行 `poetry self add ./simple_license_manager` 即可更新。
+> 本機修改後重新執行 `poetry self add ./simple_license_manager` 即可更新。
 
 ---
 
-## CLI 命令速查
+## 快速開始：互動式 TUI
 
-```
-project create <id> <display-name> <env-prefix>   建立新專案
-project list [-p]                                   列出所有專案（-p 顯示 Git 來源）
+安裝完成後，在任意專案目錄執行：
 
-key generate <project-id>                           產生 RSA-2048 金鑰對
-key list     <project-id>                           列出金鑰版本
-key show     <project-id>                           顯示公鑰 PEM
-
-license issue  <project-id> <fingerprint>           簽發授權
-  --client / -c  "Acme Corp"                        客戶名稱
-  --expires / -e YYYY-MM-DD                         到期日（省略=永久）
-  --mac / -m     aa:bb:cc:dd:ee:ff                  MAC 位址（審計用）
-  --output / -o  /path/to/out.lic                   輸出路徑
-
-license list   <project-id>                         列出所有授權記錄
-license export <license-id>  [--output PATH]        匯出 .lic 檔案
-license revoke <license-id>                         撤銷授權
-
-sdk export     <project-id>  [--output DIR]         匯出客戶端 SDK
-  --no-guide                                        不附帶整合說明文件
+```bash
+licmgr
 ```
 
-**Poetry plugin 模式**加上 `lm ` 前綴；**獨立 CLI** 直接使用 `licmg`：
+將出現帶箭頭選擇的互動式主選單：
 
-| Poetry plugin | 獨立 CLI |
-|---|---|
-| `poetry lm project list` | `licmg project list` |
-| `poetry lm license issue ...` | `licmg license issue ...` |
+```
+╭─ licmgr — 離線授權管理工具 ──────╮
+│  RSA-2048 + SQLite  |  Apache 2.0  │
+╰────────────────────────────────────╯
+
+? 主選單
+  > 📁  專案管理
+    🔑  金鑰管理
+    📄  授權管理
+    📦  SDK 匯出
+    ⚙   設定
+    🚪  離開
+```
+
+用 **↑↓ 方向鍵** 選擇，**Enter** 確認，所有操作均有引導提示。
+
+### 初次使用流程（約 2 分鐘）
+
+```
+1. licmgr → 📁 專案管理 → 新增專案
+   輸入：專案 ID、名稱、環境前綴
+
+2. licmgr → 🔑 金鑰管理 → 選擇專案 → 產生新金鑰對
+   RSA-2048 金鑰對自動存入 ~/.licmgr/
+
+3. licmgr → 📄 授權管理 → 選擇專案 → 簽發新授權
+   貼上客戶指紋 → .lic 檔自動存入 ./projects/<id>/licenses/
+```
+
+### 設定儲存路徑
+
+```
+licmgr → ⚙ 設定
+```
+
+可在 TUI 內直接修改並儲存 DB 路徑、金鑰目錄、授權檔目錄，設定寫入當前目錄的 `licmgr.toml`。
 
 ---
 
-## 資料儲存位置
+## 預設儲存路徑
 
-私鑰和資料庫預設存放於 `~/.licmg/`：
+| 資料類型 | 預設路徑 | 說明 |
+|---------|---------|------|
+| 資料庫（DB） | `~/.licmgr/registry.db` | SQLite，記錄所有專案／金鑰／授權 |
+| 私鑰 | `~/.licmgr/projects/<id>/keys/private_key_vN.pem` | 僅擁有者可讀（chmod 600） |
+| 公鑰 | `~/.licmgr/projects/<id>/keys/public_key_vN.pem` | 可安全公開 |
+| `.lic` 授權檔 | `<CWD>/projects/<id>/licenses/<client>.lic` | 交付給客戶，不含私密資訊 |
 
 ```
-~/.licmg/
-├── registry.db              # 授權登錄資料庫（SQLite）
+~/.licmgr/                        ← 安全資料根目錄（不在 git repo 內）
+├── registry.db                   ← 授權登錄資料庫
 └── projects/
-    └── <project-id>/
+    └── MY_PROJ/
         └── keys/
-            ├── private_key_v1.pem   # 私鑰（只有擁有者可讀）
-            └── public_key_v1.pem
+            ├── private_key_v1.pem   # 私鑰（絕對不要 commit）
+            └── public_key_v1.pem    # 公鑰（可公開）
+
+<CWD>/projects/                   ← 授權檔輸出目錄（與工作目錄綁定）
+└── MY_PROJ/
+    └── licenses/
+        └── Acme_Corp.lic          # 交付給客戶的授權檔
 ```
 
-此目錄的特點：
+`~/.licmgr/` 特性：
 - 不在任何 git repo 內 — 永遠不會被 commit
-- Plugin 移除（`poetry self remove licmg`）不影響此目錄
-- 專案目錄搬移或重命名不影響資料
-- Linux/macOS：`chmod 700`（OS 層級存取限制）
+- 移除 plugin（`poetry self remove licmgr`）不影響此目錄
+- 跨專案共用，專案目錄搬移不影響資料
 
-`.lic` 授權檔（交付給客戶的）預設儲存在工作目錄的 `projects/<id>/licenses/`，
-方便直接傳遞給客戶，不含任何敏感資訊。
+---
 
-### 自訂 DB 路徑
+## 設定檔（licmgr.toml）
 
-在工作目錄放置 `licmg.toml`：
+在工作目錄建立 `licmgr.toml` 可覆蓋所有預設路徑（也可透過 TUI ⚙ 設定自動寫入）：
 
 ```toml
 [database]
-url = "sqlite:////absolute/path/to/registry.db"
+# SQLite 相對路徑（相對於 licmgr.toml 所在目錄）
+url = "sqlite:///db/registry.db"
+# 或絕對路徑：
+# url = "sqlite:////home/user/.licmgr/registry.db"
+
+[storage]
+# 金鑰根目錄（留空 = ~/.licmgr/projects/）
+keys_dir = ""
+# 授權檔輸出根目錄（留空 = <CWD>/projects/）
+licenses_dir = ""
 ```
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `database.url` | SQLAlchemy DB URL | `sqlite:///<~/.licmgr/registry.db>` |
+| `storage.keys_dir` | 金鑰根目錄（絕對路徑） | `~/.licmgr/projects/` |
+| `storage.licenses_dir` | 授權檔輸出根目錄 | `<CWD>/projects/` |
 
 ---
 
-## 典型 CI/CD 工作流程
+## Poetry Plugin 非互動命令（CI/CD 用）
+
+安裝後也可用 `poetry licmgr` 執行非互動命令，適合 CI/CD 腳本：
+
+```bash
+poetry licmgr project create MY_PROJ "My Project" MYPROJ
+poetry licmgr key generate MY_PROJ
+poetry licmgr license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires 2027-12-31
+poetry licmgr license list MY_PROJ
+poetry licmgr sdk export MY_PROJ --output ./dist/MY_PROJ
+```
+
+典型 GitHub Actions 用法：
 
 ```yaml
-# .github/workflows/issue-license.yml
 - name: Issue license
   run: |
-    poetry lm license issue $PROJECT_ID $FINGERPRINT \
+    poetry licmgr license issue $PROJECT_ID $FINGERPRINT \
       --client "$CLIENT_NAME" \
       --expires "$EXPIRY_DATE" \
       --output artifacts/license.lic
@@ -123,42 +157,7 @@ url = "sqlite:////absolute/path/to/registry.db"
 
 ---
 
-## 本機互動式 TUI（開發者用）
-
-若你 clone 了這個 repo，仍可使用原來的互動式選單（無需安裝為 plugin）：
-
-```bash
-poetry install
-poetry run python tools/main.py
-```
-
-選單提供：專案管理 / 金鑰管理 / 授權管理 / SDK 匯出，操作與 CLI 命令功能相同。
-
----
-
-## 快速使用
-
-> 日常發授權只需要這三個步驟，不需要讀完整份文件。
-
-### 前置：初始化（只做一次）
-
-在**你的開發機**執行，建立資料庫並進入 Master CLI：
-
-```bash
-poetry run python tools/main.py
-```
-
-首次執行會自動建立 `db/registry.db`。在 CLI 中依序：
-1. `[p]` 新增專案
-2. `[k]` 為專案產生金鑰對
-
-或直接用舊腳本產生單組金鑰：
-
-```bash
-poetry run python tools/generate_keys.py
-```
-
----
+## 每次發授權的流程
 
 ### 每次發授權的流程
 
@@ -174,17 +173,22 @@ python client_sdk/get_fingerprint.py
 
 ---
 
-**② 你的開發機：簽章產生授權檔**
+**② 你的開發機：簽發授權**
 
+**TUI 方式（推薦）：**
 ```bash
-# 永久授權
-poetry run python tools/sign_license.py <貼上指紋>
-
-# 限期授權（建議）
-poetry run python tools/sign_license.py <貼上指紋> --expires 2027-12-31
+licmgr
+# → 📄 授權管理 → 選擇專案 → 簽發新授權 → 貼上指紋
 ```
 
-複製印出的 JSON 內容，傳回給甲方。
+**.lic 檔自動儲存到** `./projects/<id>/licenses/<客戶名>.lic`
+
+**指令方式（CI/CD）：**
+```bash
+poetry licmgr license issue MY_PROJ <指紋> --client "Acme Corp" --expires 2027-12-31
+```
+
+將 `.lic` 檔傳給甲方。
 
 ---
 

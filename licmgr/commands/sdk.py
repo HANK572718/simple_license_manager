@@ -6,10 +6,10 @@ from pathlib import Path
 from cleo.commands.command import Command
 from cleo.helpers import argument, option
 
-from licmg.core.db.crud import get_active_key, get_project
-from licmg.core.db.engine import init_db
+from licmgr.core.db.crud import get_active_key, get_project
+from licmgr.core.db.engine import init_db
 
-# Template files are bundled inside the package at licmg/data/client_sdk/
+# Template files are bundled inside the package at licmgr/data/client_sdk/
 _TEMPLATE_DIR = Path(__file__).parent.parent / "data" / "client_sdk"
 
 # Placeholder strings in the template verify_license.py (must match exactly)
@@ -63,7 +63,7 @@ class SdkExportCommand(Command):
         if not _TEMPLATE_DIR.exists():
             self.line_error(
                 f"<error>Template directory not found: {_TEMPLATE_DIR}\n"
-                "Ensure licmg was installed correctly (package data included).</error>"
+                "Ensure licmgr was installed correctly (package data included).</error>"
             )
             return 1
 

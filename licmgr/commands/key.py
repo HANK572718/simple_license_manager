@@ -8,13 +8,13 @@ from rich.table import Table
 from cleo.commands.command import Command
 from cleo.helpers import argument, option
 
-from licmg.core.db.crud import create_key, get_active_key, get_project, list_keys
-from licmg.core.db.engine import LICMG_DATA_DIR, init_db
-from licmg.core.generate_keys import generate_key_pair
+from licmgr.core.db.crud import create_key, get_active_key, get_project, list_keys
+from licmgr.core.db.engine import LICMGR_DATA_DIR, init_db
+from licmgr.core.generate_keys import generate_key_pair
 
 # Private keys are stored under the global safe data directory by default.
 # This path survives plugin reinstalls, git operations, and project moves.
-_DEFAULT_KEYS_ROOT = LICMG_DATA_DIR / "projects"
+_DEFAULT_KEYS_ROOT = LICMGR_DATA_DIR / "projects"
 
 
 class KeyGenerateCommand(Command):
@@ -31,7 +31,7 @@ class KeyGenerateCommand(Command):
         option(
             "--keys-dir",
             None,
-            "Override the root directory for key storage (default: ~/.licmg/projects)",
+            "Override the root directory for key storage (default: ~/.licmgr/projects)",
             flag=False,
             default=None,
         ),
@@ -76,7 +76,7 @@ class KeyGenerateCommand(Command):
         self.line(f"  Private key : {priv_path}")
         self.line(f"  Public key  : {pub_path}")
         self.line(f"  Public fp   : {pub_fp[:16]}...")
-        self.line("<comment>Private key stored in ~/.licmg/ — never commit it.</comment>")
+        self.line("<comment>Private key stored in ~/.licmgr/ — never commit it.</comment>")
         return 0
 
 

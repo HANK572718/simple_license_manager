@@ -1,18 +1,18 @@
-"""SQLAlchemy engine and session factory for licmg.
+"""SQLAlchemy engine and session factory for licmgr.
 
 Data storage design
 -------------------
-Private keys and the registry database are stored in ``~/.licmg/``
+Private keys and the registry database are stored in ``~/.licmgr/``
 so they survive across:
   - git commits / pushes (directory is outside the repo)
-  - ``poetry self remove licmg`` (user home is unaffected)
+  - ``poetry self remove licmgr`` (user home is unaffected)
   - Project directory moves or renames
 
 Config resolution order (evaluated at first DB call, not at import):
-  1. ``database.url`` in ``licmg.toml`` found in the current working directory
-  2. Built-in default: ``~/.licmg/registry.db``
+  1. ``database.url`` in ``licmgr.toml`` found in the current working directory
+  2. Built-in default: ``~/.licmgr/registry.db``
 
-The ``~/.licmg`` directory is:
+The ``~/.licmgr`` directory is:
   - Protected by OS permissions (chmod 700 on POSIX)
   - Never committed to version control
   - Not cleaned up by package managers
@@ -34,39 +34,73 @@ else:
 
 from .models import Base
 
-_CONFIG_FILENAME = "licmg.toml"
+_CONFIG_FILENAME = "licmgr.toml"
 
 # Global safe data root — survives plugin reinstalls and git operations
-LICMG_DATA_DIR: Path = Path.home() / ".licmg"
+LICMGR_DATA_DIR: Path = Path.home() / ".licmgr"
 
 _engine = None
 
 
 def _get_default_db_url() -> str:
     """Return the default SQLite URL pointing to the user's safe data directory."""
-    db_path = LICMG_DATA_DIR / "registry.db"
-    # SQLAlchemy accepts forward slashes on all platforms
+    db_path = LICMGR_DATA_DIR / "registry.db"
     return f"sqlite:///{db_path.as_posix()}"
 
 
-def _load_db_url() -> str:
-    """Read the database URL from licmg.toml in cwd, or return the default."""
+def get_config() -> dict:
+    """Load and return the full licmgr.toml config dict (or empty dict if none)."""
     config_path = Path.cwd() / _CONFIG_FILENAME
     if config_path.exists():
         with config_path.open("rb") as f:
-            config = tomllib.load(f)
-        url = config.get("database", {}).get("url")
-        if url:
-            return url
-    return _get_default_db_url()
+            return dict(tomllib.load(f))
+    return {}
+
+
+def save_config(config: dict) -> None:
+    """Write the given config dict to licmgr.toml in the current working directory."""
+    lines: list[str] = []
+
+    db_section = config.get("database", {})
+    if db_section:
+        lines.append("[database]")
+        for k, v in db_section.items():
+            lines.append(f'{k} = "{v}"')
+        lines.append("")
+
+    storage_section = config.get("storage", {})
+    if storage_section:
+        lines.append("[storage]")
+        for k, v in storage_section.items():
+            lines.append(f'{k} = "{v}"')
+        lines.append("")
+
+    defaults_section = config.get("defaults", {})
+    if defaults_section:
+        lines.append("[defaults]")
+        for k, v in defaults_section.items():
+            if isinstance(v, (int, float, bool)):
+                lines.append(f"{k} = {v}")
+            else:
+                lines.append(f'{k} = "{v}"')
+        lines.append("")
+
+    config_path = Path.cwd() / _CONFIG_FILENAME
+    config_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _load_db_url() -> str:
+    """Read the database URL from licmgr.toml in cwd, or return the default."""
+    url = get_config().get("database", {}).get("url")
+    return url if url else _get_default_db_url()
 
 
 def _ensure_data_dir() -> None:
     """Create the data directory with restrictive permissions if it doesn't exist."""
-    LICMG_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LICMGR_DATA_DIR.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":  # POSIX only: restrict to owner read/write/execute
         try:
-            os.chmod(LICMG_DATA_DIR, stat.S_IRWXU)
+            os.chmod(LICMGR_DATA_DIR, stat.S_IRWXU)
         except OSError:
             pass
 

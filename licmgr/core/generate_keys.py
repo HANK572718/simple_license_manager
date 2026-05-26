@@ -1,4 +1,4 @@
-"""RSA-2048 key pair generation for licmg projects."""
+"""RSA-2048 key pair generation for licmgr projects."""
 
 import hashlib
 from pathlib import Path

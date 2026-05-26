@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for licmg."""
+"""SQLAlchemy ORM models for licmgr."""
 
 from datetime import datetime
 
