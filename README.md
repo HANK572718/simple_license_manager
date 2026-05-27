@@ -41,6 +41,34 @@ poetry self add ./simple_license_manager
 
 > ⚠️ **Windows 跨磁碟注意**：若 Poetry 安裝在 C: 而專案在 D:，`poetry self add ./local_path` 可能無法正確登錄套件，請改用方式 A（Git URL）。
 
+### 安裝疑難排解 — Debian/Ubuntu：`poetry self add` 卡 greenlet 標頭檔權限
+
+在 **Debian/Ubuntu 系列**（含 NVIDIA Jetson / JetPack）以官方安裝器裝 Poetry 後，`poetry self add`（方式 A 與 B 皆會）可能失敗：
+
+```
+PermissionError: [Errno 13] Permission denied: '/usr/include/python3.10/greenlet'
+  ...poetry/installation/wheel_installer.py ... parent_folder.mkdir(...)
+Cannot install greenlet.
+```
+
+**這不是 licmgr 的 bug，也與 aarch64 相容性／編譯無關**（同一顆 greenlet wheel 在一般專案 venv `poetry install` 裝得起來）。根因是 **Debian/Ubuntu 的 sysconfig 回歸 bug**：Poetry 官方安裝器的 self-venv（`~/.local/share/pypoetry/venv`）裡 `sysconfig.get_path('include')` 仍回報 root 擁有的 `/usr/include/python3.10`，而 licmgr 依賴 SQLAlchemy → 連帶拉入 greenlet，其 wheel 要把 C 標頭檔 `greenlet.h` 寫進那個 root 目錄 → 權限被拒。
+
+**解法（推薦，範圍最小、可還原、不污染 Poetry 環境）**：先把標頭檔目標目錄建好並改為自己擁有，再用**不加 sudo** 的 `poetry self add`：
+
+```bash
+sudo mkdir -p /usr/include/python3.10/greenlet
+sudo chown "$(id -un)":"$(id -gn)" /usr/include/python3.10/greenlet
+poetry self add git+https://github.com/HANK572718/simple_license_manager.git   # 注意：不加 sudo
+```
+
+如此 `greenlet.h` 寫進這個「現在可寫」的目錄，其餘套件全部以使用者身分裝進 user-owned 的 self-venv。還原：`sudo rm -rf /usr/include/python3.10/greenlet`。
+
+> ⚠️ **不要用 `sudo poetry self add`**：sudo 以 `HOME=/root`、root 身分執行，會在你的 Poetry self-venv 留下 **root 擁有的檔案**並使 self 狀態分裂，導致日後（非 sudo 的）`poetry self update / remove` 權限錯誤。社群（poetry#612、#3596）亦明確勸退以 root 安裝。
+
+> 💡 此為「本機」workaround；換一台 Debian/Ubuntu 機器需重做相同步驟。若需「推一次、到處都能乾淨安裝」，可考慮在 licmgr 端改用標準庫 `sqlite3` 取代 SQLAlchemy 以移除 greenlet 依賴。
+>
+> 參考：[poetry#7454](https://github.com/python-poetry/poetry/issues/7454)、[Debian #1007966](https://www.mail-archive.com/debian-bugs-dist@lists.debian.org/msg1847578.html)、[bugs.python.org #36383](https://bugs.python.org/issue36383)、[Ubuntu #1940705](https://bugs.launchpad.net/ubuntu/+source/python3.10/+bug/1940705)
+
 ---
 
 ## 核心概念：金鑰與授權的關係
