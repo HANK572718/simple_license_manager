@@ -141,6 +141,40 @@ def list_licenses(project_id: str) -> list[License]:
         ).scalars().all()
 
 
+def find_licenses_by_fp(
+    project_id: str,
+    machine_fp: str,
+    *,
+    only_active: bool = True,
+) -> list[License]:
+    """Find existing licenses for *machine_fp* under *project_id*.
+
+    Used by the issue-time duplicate-fingerprint guard. Catches cases where
+    two licenses end up bound to the same hardware identity — often because a
+    vendor-supplied dev machine inherited /etc/machine-id (or similar) from a
+    cloned image and the operator unknowingly fingerprinted the same identity
+    twice with different client labels.
+
+    Args:
+        project_id: Project scope (collisions are per-project).
+        machine_fp: 64-hex machine fingerprint to look up.
+        only_active: When True (default), exclude already-revoked rows — a
+            revoked duplicate is not a real collision (the operator already
+            'unlinked' that previous binding).
+
+    Returns:
+        Matching License rows, newest first.
+    """
+    with get_session() as s:
+        stmt = select(License).where(
+            License.project_id == project_id,
+            License.machine_fp == machine_fp,
+        )
+        if only_active:
+            stmt = stmt.where(License.revoked == False)  # noqa: E712 - SQL
+        return s.execute(stmt.order_by(License.issued_at.desc())).scalars().all()
+
+
 def revoke_license(license_id: int) -> bool:
     """Mark a license as revoked. Returns True if found and updated."""
     with get_session() as s:

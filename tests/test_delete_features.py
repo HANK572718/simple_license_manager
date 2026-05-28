@@ -458,6 +458,88 @@ def test_auto_relink_verifies_via_public_key() -> None:
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_dup_fp_guard_query() -> None:
+    """Duplicate-fingerprint guard logic: active-only filter, per-project scope.
+
+    Mirrors the SQL that crud.find_licenses_by_fp() uses (the function itself
+    opens its own session via the global engine, which is incompatible with
+    the test's in-memory session — so we exercise the underlying query
+    directly here. The production function is a thin wrapper around exactly
+    this select.)
+    """
+    print("[dup-fp guard]")
+    sess, data_dir = _fresh_session()
+    fs_root = Path(tempfile.mkdtemp(prefix="licmgr_dupfp_"))
+    try:
+        _seed(sess, fs_root)
+        now = datetime(2026, 2, 1)
+        shared_fp = "abcd" * 16  # 64-hex
+        sess.add_all([
+            License(
+                project_id="DEMO", client_name="dup_active_1",
+                machine_fp=shared_fp, fp_version=1, key_version=2,
+                issued_at=now, license_json="{}", revoked=False,
+            ),
+            License(
+                project_id="DEMO", client_name="dup_revoked_old",
+                machine_fp=shared_fp, fp_version=1, key_version=2,
+                issued_at=now, license_json="{}",
+                revoked=True, revoked_at=now,
+            ),
+            License(
+                project_id="FOO", client_name="foo_same_fp",
+                machine_fp=shared_fp, fp_version=1, key_version=1,
+                issued_at=now, license_json="{}", revoked=False,
+            ),
+        ])
+        sess.flush()
+
+        def _q(project_id: str, fp: str, only_active: bool = True):
+            stmt = select(License).where(
+                License.project_id == project_id, License.machine_fp == fp,
+            )
+            if only_active:
+                stmt = stmt.where(License.revoked == False)  # noqa: E712
+            return sess.execute(stmt.order_by(License.issued_at.desc())).scalars().all()
+
+        active_in_demo = _q("DEMO", shared_fp)
+        check(
+            "active dup in DEMO is detected (revoked excluded)",
+            len(active_in_demo) == 1 and active_in_demo[0].client_name == "dup_active_1",
+            f"got {[(l.client_name, l.revoked) for l in active_in_demo]}",
+        )
+
+        all_in_demo = _q("DEMO", shared_fp, only_active=False)
+        check("only_active=False returns both active and revoked",
+              len(all_in_demo) == 2, str(len(all_in_demo)))
+
+        names_in_demo = {l.client_name for l in all_in_demo}
+        check(
+            "FOO's same-fp license is NOT returned when scanning DEMO",
+            "foo_same_fp" not in names_in_demo,
+            str(names_in_demo),
+        )
+        in_foo = _q("FOO", shared_fp)
+        check("FOO's row is detected when scanning FOO", len(in_foo) == 1)
+
+        unknown = _q("DEMO", "0" * 64)
+        check("unknown fp returns empty", unknown == [])
+
+        # Sanity: the seeded Bravo row's fp ("f2"*32) is unique → guard does not fire
+        no_collision = _q("DEMO", "f2" * 32)
+        # Bravo is the only license with that fp in DEMO; guard would see 1 (itself),
+        # which IS the correct collision when re-issuing for Bravo's machine.
+        check(
+            "guard sees the seed's own unique fp as a collision against itself",
+            len(no_collision) == 1,
+            str(len(no_collision)),
+        )
+    finally:
+        sess.close()
+        shutil.rmtree(fs_root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def main() -> int:
     """Run all tests and report a summary; return non-zero on failure."""
     test_move_to_trash()
@@ -466,6 +548,7 @@ def main() -> int:
     test_delete_project_with_trash()
     test_retire_key()
     test_auto_relink_verifies_via_public_key()
+    test_dup_fp_guard_query()
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

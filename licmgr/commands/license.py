@@ -51,11 +51,17 @@ class LicenseIssueCommand(Command):
             "Sign with this specific key version (default: active key)",
             flag=False, default=None,
         ),
+        option(
+            "--allow-duplicate-fp", None,
+            "Proceed even if an active license already exists for this fingerprint "
+            "in this project (use for legitimately cloned hardware)",
+            flag=True,
+        ),
     ]
 
     def handle(self) -> int:
         """Execute the command."""
-        from licmgr.core.db.crud import list_keys
+        from licmgr.core.db.crud import find_licenses_by_fp, list_keys
 
         init_db()
 
@@ -70,6 +76,28 @@ class LicenseIssueCommand(Command):
         project = get_project(project_id)
         if project is None:
             self.line_error(f"<error>Project '{project_id}' not found.</error>")
+            return 1
+
+        # Duplicate-fingerprint guard. A common cause is vendor-supplied dev
+        # machines sharing /etc/machine-id from a cloned image — see README
+        # 「指紋碰撞與防呆」. Allow override with --allow-duplicate-fp.
+        dups = find_licenses_by_fp(project_id, fingerprint, only_active=True)
+        if dups and not self.option("allow-duplicate-fp"):
+            self.line_error(
+                f"<error>This fingerprint already has {len(dups)} active license(s) "
+                f"in project '{project_id}':</error>"
+            )
+            for d in dups:
+                self.line_error(
+                    f"  - #{d.id} client={d.client_name!r} key v{d.key_version} "
+                    f"issued {d.issued_at.strftime('%Y-%m-%d')}"
+                )
+            self.line_error(
+                "<error>Refusing to issue a duplicate. If this is intentional "
+                "(e.g. genuinely distinct cloned-image hardware), re-run with "
+                "--allow-duplicate-fp. Otherwise: revoke the stale license first, "
+                "or check whether both 'machines' share /etc/machine-id.</error>"
+            )
             return 1
 
         # Resolve the signing key: --key-version N picks a specific one (incl.

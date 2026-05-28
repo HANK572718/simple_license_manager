@@ -317,6 +317,10 @@ poetry licmgr key verify MY_PROJ --key-version 1 --lic ./customer.lic    # 用 v
 poetry licmgr sdk export MY_PROJ --key-version 1 -o ./dist-legacy        # 嵌 v1 公鑰(老客戶 SDK)
 poetry licmgr license issue MY_PROJ <fingerprint> --key-version 1 -c "..."  # 用 v1 簽授權
 
+# 重複指紋防呆:預設拒發已存在的 active fp,必要時可用 --allow-duplicate-fp 放行
+poetry licmgr license issue MY_PROJ <existing-fp> -c "..."                      # 會被擋,列出衝突
+poetry licmgr license issue MY_PROJ <existing-fp> -c "..." --allow-duplicate-fp # vendor 出貨真共用指紋時放行
+
 # 撤銷與刪除（檔案均搬到 ~/.licmgr/.trash/；--yes 跳過互動確認，給 CI/CD 用）
 poetry licmgr license revoke <license_id>           # 軟刪（保留 row，標記 revoked）
 poetry licmgr license delete <license_id> --yes     # 硬刪 row + 搬 .lic 到回收區
@@ -824,6 +828,32 @@ if not verify_license():
 ### Q：`--expires` 日期格式？
 
 ISO 8601 格式：`YYYY-MM-DD`，例如 `2027-12-31`。
+
+### Q：兩台機器跑出**完全一樣**的 64-hex 指紋,正常嗎?
+
+**不正常,但確實會發生**——指紋來自 OS-level 識別碼(Linux `/etc/machine-id` / Windows `MachineGuid` / macOS `IOPlatformUUID`)加 BIOS UUID。兩台機器全部相同意味著它們在這些識別碼上**共用同一身分**。最常見原因:
+
+1. **Vendor 預裝映像帶有已生成的 machine-id**(硬體公司用 golden image 批次出貨、QA 開機過再 clone)→ 全部單元繼承同一 `/etc/machine-id`。**Jetson / 工業 SBC / OEM 工作站**特別容易踩;Tegra 還少了 BIOS UUID 這個強識別,撞機率更高。
+2. **VM 從同一 template 克隆,沒做 sysprep / `systemd-machine-id-setup`** → 多個 VM 共用識別碼。
+3. **同一台實體機被誤採二次指紋,標上不同 client 名**(資料輸入時點錯)。
+
+**怎麼確認**(在兩台機器上各跑):
+```bash
+echo "=== $(hostname) ===" && cat /etc/machine-id && sudo dmidecode -s system-uuid 2>/dev/null || echo "(no SMBIOS — embedded board)"
+```
+兩台輸出一字不差 → 100% 是身分共用問題。
+
+**怎麼修**(其中一台執行,讓它取得新身分):
+```bash
+sudo rm /etc/machine-id /var/lib/dbus/machine-id
+sudo systemd-machine-id-setup
+sudo dbus-uuidgen --ensure
+sudo reboot
+# 重啟後重跑 get_fingerprint.py → 新指紋
+# 然後在 licmgr:license delete 舊紀錄,license issue 新指紋
+```
+
+**licmgr 怎麼防呆**:`poetry licmgr license issue` 在執行時會檢查同專案的 active license,若指紋已存在會列出衝突並拒發。TUI 端跳警告 panel + 二次確認;CLI 端要明確加 `--allow-duplicate-fp` 才放行(用於 vendor 真的就是這樣出貨、確認過要對「合法的相同指紋硬體」分別簽兩張的場景)。已撤銷(revoked)的同指紋紀錄**不會**擋下重發。
 
 ---
 

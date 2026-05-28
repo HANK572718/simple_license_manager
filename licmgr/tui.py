@@ -827,6 +827,35 @@ def _issue_license_tui(project_id: str) -> None:
     if not fp or len(fp) != 64:
         console.print("[red]指紋格式不正確（需 64 字元 hex）。[/red]")
         return
+
+    # Duplicate-fingerprint guard. Most common cause: vendor-supplied dev
+    # machines sharing /etc/machine-id (or equivalent OS-level identifier)
+    # because the unit was deployed from a post-boot cloned image. See README
+    # 「指紋碰撞與防呆」.
+    from licmgr.core.db.crud import find_licenses_by_fp
+    dups = find_licenses_by_fp(project_id, fp, only_active=True)
+    if dups:
+        lines = "\n".join(
+            f"  #{d.id}  客戶={d.client_name!r}  key v{d.key_version}  "
+            f"簽發 {d.issued_at.strftime('%Y-%m-%d')}"
+            for d in dups
+        )
+        console.print(Panel(
+            f"[yellow bold]⚠ 此指紋在 {project_id} 已有 {len(dups)} 筆有效授權:[/yellow bold]\n"
+            f"{lines}\n\n"
+            f"[dim]最可能原因:vendor 預裝映像導致兩台機器共用 /etc/machine-id 等識別碼。\n"
+            f"建議:先 ssh 過去兩台跑 `cat /etc/machine-id`,若真的相同需重置(見 README)。\n"
+            f"若是 vendor 出貨真的就這樣、確定要對「合法的相同指紋硬體」再發一張,可繼續。[/dim]",
+            title="[yellow]Duplicate fingerprint[/yellow]",
+            expand=False,
+        ))
+        proceed = _ask(lambda: questionary.confirm(
+            "仍要簽發?(預設不發)", default=False
+        ).ask())
+        if not proceed:
+            console.print("[dim]已取消。[/dim]")
+            return
+
     client = _ask(lambda: questionary.text("客戶名稱：", default="unnamed").ask())
     if client is None:
         return
