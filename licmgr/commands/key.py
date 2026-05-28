@@ -9,7 +9,7 @@ from cleo.commands.command import Command
 from cleo.helpers import argument, option
 
 from licmgr.core.db.crud import create_key, get_active_key, get_project, list_keys
-from licmgr.core.db.engine import LICMGR_DATA_DIR, init_db
+from licmgr.core.db.engine import LICMGR_DATA_DIR, get_session, init_db
 from licmgr.core.generate_keys import generate_key_pair
 
 # Private keys are stored under the global safe data directory by default.
@@ -80,6 +80,77 @@ class KeyGenerateCommand(Command):
         return 0
 
 
+class KeyImportCommand(Command):
+    """Import an existing private key, deriving its public key + DB rows."""
+
+    name = "key import"
+    description = (
+        "Import an existing RSA private key: derive its public key and "
+        "rebuild the keys (and if needed projects) registry rows"
+    )
+
+    arguments = [
+        argument("project-id", "Project identifier"),
+        argument("private-key-path", "Path to the existing private_key_vN.pem"),
+    ]
+
+    options = [
+        option("--version", None, "Key version number (default: 1)",
+               flag=False, default="1"),
+        option("--env-prefix", None,
+               "Env-var prefix for a NEW project (default: project id)",
+               flag=False, default=None),
+        option("--no-create-project", None,
+               "Fail instead of creating the project if it is missing",
+               flag=True),
+    ]
+
+    def handle(self) -> int:
+        """Execute the command."""
+        from licmgr.core.import_key import import_private_key
+
+        init_db()
+
+        project_id = self.argument("project-id")
+        priv_path = self.argument("private-key-path")
+        try:
+            version = int(self.option("version"))
+        except ValueError:
+            self.line_error("<error>--version must be an integer.</error>")
+            return 1
+
+        try:
+            with get_session() as s:
+                summary = import_private_key(
+                    s,
+                    project_id,
+                    priv_path,
+                    version=version,
+                    env_prefix=self.option("env-prefix"),
+                    create_project=not self.option("no-create-project"),
+                )
+        except ValueError as exc:
+            self.line_error(f"<error>{exc}</error>")
+            return 1
+
+        if summary["project_created"]:
+            self.line(
+                f"<info>Project '{project_id}' created "
+                f"(env_prefix={summary['env_prefix']}).</info>"
+            )
+        self.line(
+            f"<info>Key v{version} {summary['key_action']} for '{project_id}'.</info>"
+        )
+        self.line(f"  Public fp   : {summary['public_key_fp']}")
+        if summary["public_key_path"]:
+            self.line(f"  Public key  : {summary['public_key_path']}")
+        self.line(
+            "<comment>Derived public key is byte-identical to the original — "
+            "previously-issued .lic files remain valid.</comment>"
+        )
+        return 0
+
+
 class KeyListCommand(Command):
     """List all key versions for a project."""
 
@@ -147,3 +218,87 @@ class KeyShowCommand(Command):
         self.line(f"<info>Active key v{key.version} for '{project_id}':</info>")
         self.line(key.public_key_pem)
         return 0
+
+
+class KeyVerifyCommand(Command):
+    """Verify that a project's private key matches a public key / license."""
+
+    name = "key verify"
+    description = (
+        "Verify a private key matches a public key, verify_license.py, or .lic file"
+    )
+
+    arguments = [
+        argument("project-id", "Project identifier"),
+    ]
+
+    options = [
+        option("--key", None, "Private key .pem path (default: DB-recorded path)",
+               flag=False, default=None),
+        option("--verify-license", None, "verify_license.py file with embedded PUBLIC_KEY_PEM",
+               flag=False, default=None),
+        option("--pub", None, "Public key .pem path", flag=False, default=None),
+        option("--lic", None, ".lic file to functionally verify the signature against",
+               flag=False, default=None),
+    ]
+
+    def handle(self) -> int:
+        """Execute the command."""
+        import json
+
+        from licmgr.core import keycheck
+
+        init_db()
+
+        project_id = self.argument("project-id")
+        project = get_project(project_id)
+        if project is None:
+            self.line_error(f"<error>Project '{project_id}' not found.</error>")
+            return 1
+
+        # Resolve the private key.
+        key_opt = self.option("key")
+        if key_opt:
+            priv_path = Path(key_opt).expanduser()
+        else:
+            active = get_active_key(project_id)
+            if active is None:
+                self.line_error(f"<error>No active key for '{project_id}'.</error>")
+                return 1
+            priv_path = Path(active.private_key_path).expanduser()
+        if not priv_path.is_file():
+            self.line_error(f"<error>Private key not found: {priv_path}</error>")
+            return 1
+        priv_pem = priv_path.read_bytes()
+
+        # Resolve the comparison target (exactly one expected).
+        vl = self.option("verify-license")
+        pub = self.option("pub")
+        lic = self.option("lic")
+        supplied = [x for x in (vl, pub, lic) if x]
+        if len(supplied) != 1:
+            self.line_error(
+                "<error>Provide exactly one of --verify-license / --pub / --lic.</error>"
+            )
+            return 1
+
+        try:
+            if vl:
+                text = Path(vl).expanduser().read_text(encoding="utf-8")
+                pub_pem = keycheck.parse_pubkey_from_verify_license(text)
+                matched, reason = keycheck.verify_keypair(priv_pem, public_pem=pub_pem)
+            elif pub:
+                pub_pem = Path(pub).expanduser().read_bytes()
+                matched, reason = keycheck.verify_keypair(priv_pem, public_pem=pub_pem)
+            else:
+                lic_data = json.loads(Path(lic).expanduser().read_text(encoding="utf-8"))
+                matched, reason = keycheck.verify_keypair(priv_pem, lic=lic_data)
+        except Exception as exc:  # noqa: BLE001
+            self.line_error(f"<error>{exc}</error>")
+            return 1
+
+        if matched:
+            self.line(f"<info>MATCH</info> — {reason}")
+            return 0
+        self.line_error(f"<error>NO MATCH</error> — {reason}")
+        return 1

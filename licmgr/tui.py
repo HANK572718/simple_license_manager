@@ -161,7 +161,8 @@ def _key_menu() -> None:
     while True:
         action = _ask(lambda: questionary.select(
             f"🔑 金鑰管理 — {pid}",
-            choices=["列出金鑰", "產生新金鑰對", "顯示公鑰 PEM", _BACK],
+            choices=["列出金鑰", "產生新金鑰對", "📥  導入既有私鑰",
+                     "顯示公鑰 PEM", "🔗  驗證金鑰配對", _BACK],
         ).ask())
         if action is None or action == _BACK:
             return
@@ -169,8 +170,12 @@ def _key_menu() -> None:
             _list_keys_tui(pid)
         elif action == "產生新金鑰對":
             _generate_key_tui(pid)
+        elif action == "📥  導入既有私鑰":
+            _import_key_tui()
         elif action == "顯示公鑰 PEM":
             _show_key_tui(pid)
+        elif action == "🔗  驗證金鑰配對":
+            _verify_keypair_tui(pid)
 
 
 def _list_keys_tui(project_id: str) -> None:
@@ -216,6 +221,103 @@ def _generate_key_tui(project_id: str) -> None:
     console.print(f"  [dim]私鑰儲存於 {_keys_dir()} — 請勿 commit[/dim]")
 
 
+def _import_key_tui() -> None:
+    """Import an existing private key: derive its public key and (re)build rows.
+
+    Flow: ask the private-key path, then either pick an existing project or
+    enter a NEW project id (prompting env_prefix and version). For an existing
+    project that already stores a public key, warn if the derived public key
+    differs from the stored one (which would mean the wrong private key).
+    """
+    from licmgr.core import import_key as _import_key
+
+    raw = _ask(lambda: questionary.text("既有私鑰 .pem 路徑：").ask())
+    if not raw:
+        return
+    priv_path = Path(raw).expanduser()
+    if not priv_path.is_file():
+        console.print(f"[red]找不到私鑰檔案：{priv_path}[/red]")
+        return
+
+    _NEW = "＋ 新增專案 ID"
+    projects = list_projects()
+    choices = [p.id for p in projects] + [_NEW, _CANCEL]
+    target = _ask(lambda: questionary.select(
+        "導入到哪個專案？", choices=choices,
+    ).ask())
+    if target is None or target == _CANCEL:
+        return
+
+    create_proj = False
+    env_prefix: str | None = None
+    version = 1
+    if target == _NEW:
+        pid = _ask(lambda: questionary.text("新專案 ID（英文大寫，例 MY_PROJ）：").ask())
+        if not pid:
+            return
+        pid = pid.upper()
+        if get_project(pid):
+            console.print(f"[red]專案 '{pid}' 已存在，請改從清單選取。[/red]")
+            return
+        create_proj = True
+        env_prefix = _ask(lambda: questionary.text(
+            "環境變數前綴（驅動客戶端 <PREFIX>_LICENSE_FILE）：", default=pid,
+        ).ask())
+        if env_prefix:
+            env_prefix = env_prefix.upper()
+        ver_raw = _ask(lambda: questionary.text("金鑰版本：", default="1").ask())
+        try:
+            version = int(ver_raw)
+        except (TypeError, ValueError):
+            console.print("[red]無效的版本號。[/red]")
+            return
+    else:
+        pid = target
+        # Capture the stored public key (if any) to compare after import.
+        prior = get_active_key(pid)
+        if prior is not None:
+            try:
+                derived_pem, _ = _import_key.derive_public_material(priv_path.read_bytes())
+            except ValueError as exc:
+                console.print(f"[red]{exc}[/red]")
+                return
+            if derived_pem.strip() != (prior.public_key_pem or "").strip():
+                console.print(
+                    "[bold red]⚠ 警告：導出的公鑰與此專案既存的公鑰不同！[/bold red]"
+                )
+                console.print(
+                    "[yellow]這很可能是錯誤的私鑰；繼續將覆寫資料庫中的公鑰紀錄。[/yellow]"
+                )
+                cont = _ask(lambda: questionary.confirm("仍要繼續？", default=False).ask())
+                if not cont:
+                    return
+
+    try:
+        with get_session() as s:
+            summary = _import_key.import_private_key(
+                s, pid, priv_path,
+                version=version,
+                env_prefix=env_prefix,
+                create_project=create_proj,
+            )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return
+
+    if summary["project_created"]:
+        console.print(
+            f"[green]✓ 已建立專案 '{pid}'（env_prefix={summary['env_prefix']}）。[/green]"
+        )
+    verb = "已新增" if summary["key_action"] == "created" else "已更新"
+    console.print(f"[green]✓ 金鑰 v{version} {verb}。[/green]")
+    console.print(f"  公鑰指紋 : {summary['public_key_fp']}")
+    if summary["public_key_path"]:
+        console.print(f"  公鑰檔案 : {summary['public_key_path']}")
+    console.print(
+        "  [dim]導出的公鑰與原始公鑰位元組相同 — 先前簽發的 .lic 仍然有效。[/dim]"
+    )
+
+
 def _show_key_tui(project_id: str) -> None:
     key = get_active_key(project_id)
     if key is None:
@@ -223,6 +325,130 @@ def _show_key_tui(project_id: str) -> None:
         return
     console.print(f"[cyan]v{key.version} 公鑰 PEM（可安全公開）：[/cyan]")
     console.print(key.public_key_pem)
+
+
+def _verify_keypair_tui(default_project_id: str | None = None) -> None:
+    """Verify that a private key matches a public key / license / verify_license.py.
+
+    Lets the user choose a private-key source and a comparison target, then
+    prints a clear MATCH / NO MATCH verdict with a one-line reason.
+    """
+    from licmgr.core import keycheck
+
+    # ── 1. Private key source ──────────────────────────────────────────────
+    src = _ask(lambda: questionary.select(
+        "選擇「私鑰」來源：",
+        choices=["從專案讀取（DB 紀錄的私鑰路徑）", "輸入 .pem 檔案路徑", _CANCEL],
+    ).ask())
+    if src is None or src == _CANCEL:
+        return
+
+    priv_pem: bytes | None = None
+    chosen_pid: str | None = default_project_id
+
+    if src.startswith("從專案"):
+        projects = list_projects()
+        if not projects:
+            console.print("[yellow]尚無任何專案。[/yellow]")
+            return
+        choices = [p.id for p in projects] + [_CANCEL]
+        default = default_project_id if default_project_id in [p.id for p in projects] else None
+        pid = _ask(lambda: questionary.select(
+            "選擇專案：", choices=choices, default=default
+        ).ask())
+        if pid is None or pid == _CANCEL:
+            return
+        chosen_pid = pid
+        key = get_active_key(pid)
+        if key is None:
+            console.print(f"[red]專案 {pid} 無可用金鑰。[/red]")
+            return
+        priv_path = Path(key.private_key_path).expanduser()
+        if not priv_path.is_file():
+            console.print(f"[red]私鑰檔案不存在：{priv_path}[/red]")
+            console.print("[dim]提示：可至「🔁  DB 維運 → 修復金鑰路徑」修正。[/dim]")
+            return
+        priv_pem = priv_path.read_bytes()
+        console.print(f"[dim]私鑰來源：{priv_path}[/dim]")
+    else:
+        raw = _ask(lambda: questionary.text("私鑰 .pem 路徑：").ask())
+        if not raw:
+            return
+        priv_path = Path(raw).expanduser()
+        if not priv_path.is_file():
+            console.print(f"[red]找不到檔案：{priv_path}[/red]")
+            return
+        priv_pem = priv_path.read_bytes()
+
+    # ── 2. Comparison target ───────────────────────────────────────────────
+    target_choices = [
+        "verify_license.py 檔案（解析內嵌 PUBLIC_KEY_PEM）",
+        ".lic 授權檔（功能性驗章）",
+        "貼上公鑰 PEM 內容",
+        "公鑰 .pem 檔案路徑",
+    ]
+    if chosen_pid is not None:
+        target_choices.append("與 DB 內此專案儲存的公鑰比對")
+    target_choices.append(_CANCEL)
+
+    tgt = _ask(lambda: questionary.select(
+        "選擇「測試公鑰」比對來源：", choices=target_choices
+    ).ask())
+    if tgt is None or tgt == _CANCEL:
+        return
+
+    matched = False
+    reason = ""
+    try:
+        if tgt.startswith("verify_license.py"):
+            raw = _ask(lambda: questionary.text("verify_license.py 路徑：").ask())
+            if not raw:
+                return
+            text = Path(raw).expanduser().read_text(encoding="utf-8")
+            pub = keycheck.parse_pubkey_from_verify_license(text)
+            matched, reason = keycheck.verify_keypair(priv_pem, public_pem=pub)
+
+        elif tgt.startswith(".lic"):
+            raw = _ask(lambda: questionary.text(".lic 檔案路徑：").ask())
+            if not raw:
+                return
+            lic = json.loads(Path(raw).expanduser().read_text(encoding="utf-8"))
+            matched, reason = keycheck.verify_keypair(priv_pem, lic=lic)
+
+        elif tgt.startswith("貼上公鑰"):
+            text = _ask(lambda: questionary.text(
+                "貼上公鑰 PEM（多行；結束後按 Esc 再 Enter）：", multiline=True
+            ).ask())
+            if not text or not text.strip():
+                return
+            matched, reason = keycheck.verify_keypair(priv_pem, public_pem=text.encode())
+
+        elif tgt.startswith("公鑰 .pem"):
+            raw = _ask(lambda: questionary.text("公鑰 .pem 路徑：").ask())
+            if not raw:
+                return
+            pub = Path(raw).expanduser().read_bytes()
+            matched, reason = keycheck.verify_keypair(priv_pem, public_pem=pub)
+
+        else:  # DB stored public key
+            key = get_active_key(chosen_pid)
+            if key is None:
+                console.print(f"[red]專案 {chosen_pid} 無可用金鑰。[/red]")
+                return
+            matched, reason = keycheck.verify_keypair(
+                priv_pem, public_pem=key.public_key_pem.encode()
+            )
+    except FileNotFoundError as e:
+        console.print(f"[red]找不到檔案：{e}[/red]")
+        return
+    except Exception as e:  # noqa: BLE001 - surface any parse/load error to user
+        console.print(f"[red]驗證失敗：{e}[/red]")
+        return
+
+    if matched:
+        console.print(f"\n[bold green]✅ MATCH[/bold green] — {reason}\n")
+    else:
+        console.print(f"\n[bold red]❌ NO MATCH[/bold red] — {reason}\n")
 
 
 # ── License menu ──────────────────────────────────────────────────────────────
@@ -537,6 +763,174 @@ def _import_db() -> None:
         console.print("[dim]  提示：私鑰路徑仍指向原始位置，請確認金鑰檔案可存取。[/dim]")
 
 
+# ── DB maintenance menu ─────────────────────────────────────────────────────
+
+def _dbmaint_menu() -> None:
+    """Submenu for DB maintenance: scan / relink key paths and selective export."""
+    while True:
+        action = _ask(lambda: questionary.select(
+            "🔁 DB 維運",
+            choices=["檢查金鑰路徑", "修復金鑰路徑", "選擇性匯出", _BACK],
+        ).ask())
+        if action is None or action == _BACK:
+            return
+        if action == "檢查金鑰路徑":
+            _dbmaint_scan()
+        elif action == "修復金鑰路徑":
+            _dbmaint_relink()
+        elif action == "選擇性匯出":
+            _dbmaint_export()
+
+
+def _dbmaint_scan() -> None:
+    """Show a table of every key's private-key path and whether it exists."""
+    from licmgr.core import dbmaint
+
+    with get_session() as s:
+        rows = dbmaint.scan_key_paths(s)
+    if not rows:
+        console.print("[yellow]尚無任何金鑰紀錄。[/yellow]")
+        return
+    t = Table(show_header=True, header_style="bold cyan")
+    t.add_column("專案")
+    t.add_column("版本", justify="right")
+    t.add_column("私鑰路徑")
+    t.add_column("狀態")
+    for r in rows:
+        status = "[green]✓ 存在[/green]" if r["exists"] else "[red]✗ 遺失[/red]"
+        t.add_row(r["project_id"], str(r["version"]), r["private_key_path"] or "—", status)
+    console.print(t)
+    missing = [r for r in rows if not r["exists"]]
+    if missing:
+        console.print(f"[yellow]{len(missing)} 筆金鑰路徑遺失，可用「修復金鑰路徑」修正。[/yellow]")
+
+
+def _dbmaint_relink() -> None:
+    """Repair a key's private-key path: auto-search keys_dir or enter manually."""
+    from licmgr.core import dbmaint
+
+    with get_session() as s:
+        rows = dbmaint.scan_key_paths(s)
+    if not rows:
+        console.print("[yellow]尚無任何金鑰紀錄。[/yellow]")
+        return
+
+    mode = _ask(lambda: questionary.select(
+        "修復方式：",
+        choices=[
+            f"自動搜尋金鑰根目錄（{_keys_dir()}）並修復所有遺失項",
+            "手動指定單筆金鑰路徑",
+            _CANCEL,
+        ],
+    ).ask())
+    if mode is None or mode == _CANCEL:
+        return
+
+    if mode.startswith("自動搜尋"):
+        with get_session() as s:
+            report = dbmaint.auto_relink(s, _keys_dir())
+        if report["relinked"]:
+            console.print("[green]✓ 已修復：[/green]")
+            for r in report["relinked"]:
+                console.print(f"  {r['project_id']} v{r['version']} → {r['new_path']}")
+        else:
+            console.print("[dim]沒有需要修復的項目（或找不到對應檔案）。[/dim]")
+        if report["still_missing"]:
+            console.print("[yellow]仍然遺失（找不到檔案）：[/yellow]")
+            for r in report["still_missing"]:
+                console.print(f"  {r['project_id']} v{r['version']}（原路徑 {r['old_path'] or '—'}）")
+        return
+
+    # Manual: pick a key then enter a new path.
+    choices = [
+        questionary.Choice(
+            f"{r['project_id']} v{r['version']}  "
+            f"[{'存在' if r['exists'] else '遺失'}]  {r['private_key_path'] or '—'}",
+            value=(r["project_id"], r["version"]),
+        )
+        for r in rows
+    ]
+    choices.append(questionary.Choice(_CANCEL, value=None))
+    picked = _ask(lambda: questionary.select("選擇要修復的金鑰：", choices=choices).ask())
+    if not picked:
+        return
+    project_id, version = picked
+    new_path = _ask(lambda: questionary.text("新的私鑰 .pem 路徑：").ask())
+    if not new_path:
+        return
+    resolved = Path(new_path).expanduser()
+    if not resolved.is_file():
+        cont = _ask(lambda: questionary.confirm(
+            f"檔案 {resolved} 目前不存在，仍要寫入此路徑？", default=False
+        ).ask())
+        if not cont:
+            return
+    with get_session() as s:
+        ok = dbmaint.relink_key(s, project_id, version, str(resolved))
+    if ok:
+        console.print(f"[green]✓ 已更新 {project_id} v{version} 的私鑰路徑。[/green]")
+    else:
+        console.print("[red]找不到對應的金鑰紀錄。[/red]")
+
+
+def _dbmaint_export() -> None:
+    """Selectively export chosen projects + licenses into a portable bundle."""
+    from licmgr.core import dbmaint
+
+    projects = list_projects()
+    if not projects:
+        console.print("[yellow]尚無任何專案。[/yellow]")
+        return
+
+    pids = _ask(lambda: questionary.checkbox(
+        "選擇要匯出的專案（空白鍵勾選）：",
+        choices=[p.id for p in projects],
+    ).ask())
+    if not pids:
+        console.print("[dim]未選擇任何專案，已取消。[/dim]")
+        return
+
+    # Offer licenses belonging to the chosen projects.
+    lic_choices: list = []
+    for pid in pids:
+        for lic in list_licenses(pid):
+            label = (
+                f"#{lic.id} {pid} | {lic.client_name} | {lic.machine_fp[:12]}…"
+                f"{' [已撤銷]' if lic.revoked else ''}"
+            )
+            lic_choices.append(questionary.Choice(label, value=lic.id))
+
+    license_ids: list[int] = []
+    if lic_choices:
+        sel = _ask(lambda: questionary.checkbox(
+            "選擇要包含的授權（可全不選）：", choices=lic_choices
+        ).ask())
+        license_ids = sel or []
+
+    out_raw = _ask(lambda: questionary.text(
+        "輸出目錄：", default=str(Path.cwd() / "licmgr_export")
+    ).ask())
+    if not out_raw:
+        return
+    out_dir = Path(out_raw).expanduser()
+
+    with get_session() as s:
+        report = dbmaint.export_subset(s, list(pids), license_ids, out_dir)
+
+    console.print(f"\n[green]✓ 已匯出到：{report['out_dir']}[/green]")
+    console.print(f"  專案：{', '.join(report['projects']) or '—'}")
+    console.print(f"  金鑰：{report['keys_exported']} 筆（複製 {len(report['copied_keys'])} 個私鑰檔）")
+    console.print(f"  授權：{report['licenses_exported']} 筆")
+    if report["missing_key_files"]:
+        console.print("[yellow]  注意：下列私鑰檔在磁碟上不存在，未一併複製：[/yellow]")
+        for m in report["missing_key_files"]:
+            console.print(f"    {m}")
+    if report["skipped_licenses"]:
+        console.print(f"[yellow]  略過（專案未選取）的授權 id：{report['skipped_licenses']}[/yellow]")
+    if report["missing_projects"]:
+        console.print(f"[yellow]  找不到的專案：{report['missing_projects']}[/yellow]")
+
+
 # ── Help menu ─────────────────────────────────────────────────────────────────
 
 def _help_menu() -> None:
@@ -678,6 +1072,7 @@ def main() -> None:
         "📄  授權管理": _license_menu,
         "📦  SDK 匯出": _sdk_menu,
         "📥  匯入舊資料庫": _import_db,
+        "🔁  DB 維運": _dbmaint_menu,
         "⚙   設定": _settings_menu,
         "❓  說明": _help_menu,
         "🚪  離開": None,

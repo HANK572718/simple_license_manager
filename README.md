@@ -725,3 +725,134 @@ python client_sdk/get_fingerprint.py          # 取得指紋
 rich-deploy license issue DEMO <指紋> --client "Test" --expires 2027-12-31
 rich-deploy sdk export DEMO                   # 匯出 SDK 給甲方
 ```
+
+---
+
+## 🚚 進階：金鑰搬遷、跨機集中管理與 DB 維運
+
+> 處理「把簽發能力搬到另一台機器」「集中管理多把金鑰」以及「直接操作 `registry.db`」的實務問題。
+> （本節指令一律用現行的 `poetry licmgr ...`／TUI；上方參考手冊第 6/8/12 節中的 `rich-deploy`／`tools/` 為舊版結構，待更新。）
+
+### 要把「簽發能力」搬到另一台機器，需要帶什麼？
+
+關鍵事實：**`registry.db` 本身不含私鑰**——`keys` 表只存「公鑰 PEM ＋ 公鑰指紋 ＋ 私鑰的*路徑字串*」。私鑰是另外的 `.pem` 檔（預設在 `~/.licmgr/projects/<id>/keys/`）。
+
+| 帶過去的東西 | 能簽授權？ | 得到什麼 |
+|---|---|---|
+| 只有 `registry.db` | ❌ | 專案設定、已簽授權紀錄、公鑰、私鑰「路徑」——沒有任何秘密 |
+| 只有私鑰 `.pem` | ✅ | 私鑰是唯一秘密；公鑰／指紋都能由它導出。簽新授權，這把就夠 |
+| `registry.db` ＋ 私鑰 | ✅ ＋ 可管理 | 上面全部 ＋ 專案清單／已簽歷史／重新匯出舊 `.lic`（不必重簽） |
+
+- **只是要能簽** → **私鑰就夠**（甚至可不透過 licmgr，直接用 `sign_license` 的演算法簽）。
+- **要 licmgr 完整管理**（專案、歷史、重匯出）→ 才需要 `db ＋ 私鑰`，且**必須修好 db 內的私鑰路徑**（見下）。
+- 已簽好的 `.lic` 存在 `licenses.license_json`，**重新匯出不需要私鑰**；只有「簽新的」才需要私鑰。
+
+### 為什麼 `registry.db` 不直接存私鑰？（設計理由）
+
+這是刻意的「**秘密與登錄分離**」設計——db 只放「非秘密的登錄資料」，唯一的秘密（私鑰）留在受權限保護的獨立檔案：
+
+1. **用最適合的層級保護秘密**：私鑰是整個系統唯一的秘密，獨立 `.pem` 檔可套用檔案系統權限（`chmod 600`，只有擁有者可讀）；SQLite 欄位沒有同等存取控制——任何能讀到 db 檔的人／程序就讀到欄位內容。把私鑰留在受權限保護的檔案、db 只存「指向它的路徑」，保護就落在對的層級。
+2. **db 不含秘密 → 可安全備份／檢視／分享／匯入**：`registry.db` 可以複製給同事查「發過哪些授權」、匯入另一台稽核、甚至放進（非敏感）版控，而**完全不會連帶外洩私鑰**。反過來說，若把私鑰塞進 db，**任何拿到 db 的人就等同拿到「簽發任意授權」的能力**——db 的流通性會直接變成秘密外洩面。
+3. **公鑰／指紋本來就不是秘密**：db 存的 `public_key_pem`／`public_key_fp` 都是公開資訊，可由私鑰導出；真正要保護的只有那一把 `.pem`。這也呼應核心設計「私鑰永不離開開發機」（見上方「核心概念」）。
+
+> 💡 **代價（即下一節的限制）**：因為 db 只記「路徑」而非金鑰內容，把 db 搬到另一台機器時，那個絕對路徑就會失效。換句話說，下面的 relink 問題是這個「安全分離」設計的**副作用、不是 bug**——正確做法是搬機時把私鑰檔一起搬、再修好路徑。
+
+### ⚠️ 已知限制：`private_key_path` 存的是絕對路徑（搬機／匯入後會失效）
+
+產生金鑰時，licmgr 把私鑰路徑以**當下解析的絕對路徑**寫進 `keys.private_key_path`（`licmgr/commands/key.py`、`licmgr/tui.py` 的金鑰產生流程）。而**簽發時直接信任這個字串**去讀檔（`licmgr/core/sign_license.py`；`license issue` 會先檢查檔案是否存在），程式**不會**用「金鑰根目錄 ＋ 專案 ID」重新推算。
+
+因此：
+- **「📥 匯入舊資料庫」只搬 DB 列、不搬私鑰檔**，且 `private_key_path` 原樣照抄（`licmgr/tui.py` 的 `_import_db`，並會印出「私鑰路徑仍指向原始位置」警告）。
+- 換機／匯入後，`private_key_path` 仍指向**來源機**位置（可能是別台的 `D:\...` 或已搬走的 `~/.licmgr`）→ 簽發時報「找不到私鑰」。
+
+**立即解法**：把私鑰檔放到本機，再改 db 的路徑（見下「操作 `registry.db`」的 `UPDATE`）。
+
+### 開啟與操作 `registry.db`（SQLite）
+
+**先確認你動的是哪個 db**：預設 `~/.licmgr/registry.db`；但若**當前目錄有 `licmgr.toml`** 且設了 `[database].url`，會以它為準（本 repo 自帶的 `licmgr.toml` 指向相對路徑 `sqlite:///db/registry.db`）。用 `licmgr → ⚙ 設定` 可看到目前生效的 DB 路徑。
+
+```bash
+sqlite3 ~/.licmgr/registry.db        # CLI；GUI 可用「DB Browser for SQLite」
+```
+
+```sql
+.mode box
+.headers on
+.tables
+.schema keys
+
+-- 每把金鑰的私鑰路徑（relink 前先看哪些指向不存在的檔）
+SELECT id, project_id, version, private_key_path FROM keys;
+
+-- 已簽授權（license_json 內含完整 .lic，可重匯出）
+SELECT id, project_id, client_name, substr(machine_fp,1,16) AS fp, expires_at, revoked FROM licenses;
+```
+
+**修復私鑰路徑（搬機／匯入後最常用）**：
+
+```sql
+UPDATE keys
+   SET private_key_path = '/home/you/.licmgr/projects/GIT_SmartSOPGuardian/keys/private_key_v1.pem'
+ WHERE project_id = 'GIT_SmartSOPGuardian' AND version = 1;
+```
+
+三張表用途：`projects`（專案設定）、`keys`（每把金鑰：`public_key_pem`／`public_key_fp`／`private_key_path`）、`licenses`（已簽授權；`license_json` 即完整簽好的 `.lic`）。
+
+> ⚠️ 直接改 db 前**先備份**（`cp registry.db registry.db.bak`），並確認 licmgr **沒有同時開著**，避免寫入衝突。
+
+### 跨機集中管理的建議做法
+
+1. 指定統一的金鑰根目錄（`licmgr.toml` 的 `[storage].keys_dir`），把所有 `<id>/keys/` 收在一起。
+2. 搬機時**連同 `registry.db` ＋ 整個 keys 目錄一起搬**。
+3. 到新機後，用上面的 `UPDATE` 把每把 `private_key_path` 改成新機實際位置（或見下方 Roadmap 的 relink）。
+4. 不建議「在新機重新 `key generate`」繞過：那會產生**另一把**金鑰（公鑰不同），不符合「沿用既有金鑰、整合端 `verify_license.py` 不動」的情境。
+
+---
+
+## 🧭 規劃中功能（Roadmap）
+
+> 以下兩項源自實際痛點，目前**尚未實作**；每項都附「現在可用的手動替代法」。
+
+### 1. 公私鑰配對確認（verify keypair match）
+
+**動機**：有了 `db ＋ 私鑰`，卻不確定這把私鑰是否對應到「整合端 `verify_license.py` 內嵌的公鑰」。配對不上 → 簽出的 `.lic` 永遠卡在驗證「關卡三（簽章）」。
+
+**預期行為**：選一個專案／一把私鑰，與「比對來源」做配對檢查：
+- 來源 A：db 的 `keys.public_key_pem` / `public_key_fp`（已存，最容易）
+- 來源 B：指定一個整合專案的 `verify_license.py`，解析其 `PUBLIC_KEY_PEM` 後比對
+
+**介面構想**：TUI 在 `🔑 金鑰管理` 增一項「驗證金鑰配對」；非互動 `poetry licmgr key verify <project> [--key <priv.pem>] [--verify-license <path>]`。
+
+**實作要點**：`load_pem_private_key` → `.public_key().public_bytes(...)` → 比 modulus／指紋，或做一次 sign→verify 往返。（現況：`licmgr/core/generate_keys.py` 只在「產生」時導公鑰；尚無比對函式，也尚無 `verify_license.py` 的 `PUBLIC_KEY_PEM` 解析器。）
+
+**現在可用的手動法**：
+
+```bash
+# A) openssl：modulus 相等即配對
+diff <(openssl rsa -in private_key_v1.pem -noout -modulus) \
+     <(openssl rsa -pubin -in public_key_v1.pem -noout -modulus) && echo MATCH || echo NO
+
+# B) 與「整合端 verify_license.py 內嵌公鑰」比對（Python）
+python - <<'PY'
+from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
+priv = load_pem_private_key(open("private_key_v1.pem","rb").read(), None)
+pub  = load_pem_public_key(open("pub.pem","rb").read())   # 把 verify_license.py 的 PUBLIC_KEY_PEM 內容存成 pub.pem
+a, b = priv.public_key().public_numbers(), pub.public_numbers()
+print("MATCH" if (a.n == b.n and a.e == b.e) else "NO")
+PY
+```
+
+### 2. DB 移植 / 選擇性匯出 / 修復金鑰路徑
+
+**動機**：兩個實際痛點——(i) 匯入舊 db 後私鑰路徑失效；(ii) 只想挑幾筆（專案／授權）搬，而非整包。
+
+**預期子功能**：
+- **修復金鑰路徑（relink）**：掃描 `keys.private_key_path`，標出檔案不存在者，提供「指向新位置」或「自動在 `keys_dir` 找同名檔」批次修復。直接解 (i)。
+- **匯入時一併搬私鑰檔**：`_import_db` 增加選項，把來源 keys `.pem` 複製進本機 `keys_dir` 並改寫 `private_key_path`（目前只搬 DB 列、不搬檔）。
+- **選擇性匯出**：挑選專案／授權子集，匯出成可攜 bundle（mini-db ＋ 對應 keys 檔，路徑相對化）。解 (ii)。
+
+**介面構想**：TUI 於 `⚙ 設定` 內或新增「🔁 DB 維運」選單；非互動 `poetry licmgr db relink-keys`、`poetry licmgr db export --project X [--license <id>]`。
+
+**實作要點**：menu 在 `licmgr/tui.py` 的 `menu_items` 加 `"label": handler`；非互動則加 `licmgr/commands/` 的 Command 子類並於 `licmgr/plugin.py` 註冊。relink 本質是掃描 ＋ `UPDATE keys SET private_key_path=...`。
+
+**現在可用的手動法**：用上方「操作 `registry.db`」的 `UPDATE` 改路徑；選擇性匯出可暫時用 `sqlite3 .dump` 搭配手動挑表，或用 `poetry licmgr license export` 匯出個別 `.lic`。

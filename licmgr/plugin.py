@@ -20,7 +20,14 @@ Usage (from the licmgr project directory):
 from cleo.commands.command import Command
 from poetry.plugins.application_plugin import ApplicationPlugin
 
-from licmgr.commands.key import KeyGenerateCommand, KeyListCommand, KeyShowCommand
+from licmgr.commands.db import DbExportCommand, DbRelinkKeysCommand
+from licmgr.commands.key import (
+    KeyGenerateCommand,
+    KeyImportCommand,
+    KeyListCommand,
+    KeyShowCommand,
+    KeyVerifyCommand,
+)
 from licmgr.commands.license import (
     LicenseExportCommand,
     LicenseIssueCommand,
@@ -43,11 +50,23 @@ class _LicmgrProjectList(ProjectListCommand):
 class _LicmgrKeyGenerate(KeyGenerateCommand):
     name = "licmgr key generate"
 
+class _LicmgrKeyImport(KeyImportCommand):
+    name = "licmgr key import"
+
 class _LicmgrKeyList(KeyListCommand):
     name = "licmgr key list"
 
 class _LicmgrKeyShow(KeyShowCommand):
     name = "licmgr key show"
+
+class _LicmgrKeyVerify(KeyVerifyCommand):
+    name = "licmgr key verify"
+
+class _LicmgrDbRelinkKeys(DbRelinkKeysCommand):
+    name = "licmgr db relink-keys"
+
+class _LicmgrDbExport(DbExportCommand):
+    name = "licmgr db export"
 
 class _LicmgrLicenseIssue(LicenseIssueCommand):
     name = "licmgr license issue"
@@ -88,8 +107,12 @@ class LicmgrPlugin(ApplicationPlugin):
             _LicmgrProjectCreate,
             _LicmgrProjectList,
             _LicmgrKeyGenerate,
+            _LicmgrKeyImport,
             _LicmgrKeyList,
             _LicmgrKeyShow,
+            _LicmgrKeyVerify,
+            _LicmgrDbRelinkKeys,
+            _LicmgrDbExport,
             _LicmgrLicenseIssue,
             _LicmgrLicenseList,
             _LicmgrLicenseExport,
