@@ -72,36 +72,74 @@ def relink_key(session: Session, project_id: str, version: int, new_path: str) -
     return True
 
 
-def _find_candidate(keys_dir: Path, project_id: str, version: int) -> Path | None:
-    """Search *keys_dir* recursively for a private key of the given version.
+def _find_candidate(
+    keys_dir: Path,
+    project_id: str,
+    version: int,
+    *,
+    expected_pub_pem: str | None = None,
+) -> Path | None:
+    """Search *keys_dir* for the private key of a specific (project, version).
 
-    Prefers a candidate whose path contains the *project_id* as a directory
-    component; otherwise falls back to the first match found.
+    Behaviour, in priority order:
+      1. List every ``private_key_v{version}.pem`` under *keys_dir*.
+      2. **If ``expected_pub_pem`` is given (the DB-stored public PEM for this
+         Key row): derive the public PEM from each candidate via
+         ``keycheck.keys_match`` and only return the candidate whose derived
+         public matches.** This is the *correct* identity check — filenames are
+         ambiguous when multiple projects share the same version number and a
+         flat keys_dir (one ``private_key_v1.pem`` next to no project subdir).
+         Project-id directory matches are tried first as an ordering hint, but
+         the *answer* is always the cryptographic match.
+      3. Falls back to the legacy heuristic (prefer project-id-in-path, else
+         first match) only when ``expected_pub_pem`` is ``None`` — kept for
+         back-compat with callers that don't have the Key row handy.
 
-    Args:
-        keys_dir: Root directory to search.
-        project_id: Project id used to prefer a better-matching candidate.
-        version: Key version embedded in the filename.
-
-    Returns:
-        The best candidate path, or None if no file matched.
+    Returns the matching path, or ``None`` if no candidate's derived public
+    matches the expectation (or no file with the right name exists).
     """
     target = f"private_key_v{version}.pem"
     matches = [p for p in keys_dir.rglob(target) if p.is_file()]
     if not matches:
         return None
-    for p in matches:
-        if project_id in p.parts:
-            return p
-    return matches[0]
+
+    # Order: candidates whose path mentions project_id first (faster typical case).
+    ordered = sorted(matches, key=lambda p: 0 if project_id in p.parts else 1)
+
+    if expected_pub_pem is not None:
+        from . import keycheck
+        expected_bytes = expected_pub_pem.encode("utf-8")
+        for p in ordered:
+            try:
+                priv_bytes = p.read_bytes()
+                if keycheck.keys_match(priv_bytes, expected_bytes):
+                    return p
+            except Exception:
+                # Unreadable / non-PEM / wrong-algorithm file: skip silently
+                # and let the next candidate try.
+                continue
+        return None  # filename hit, but no candidate's derived pubkey matched
+
+    # Legacy heuristic (no DB context to verify against).
+    return ordered[0]
 
 
 def auto_relink(session: Session, keys_dir: Path) -> dict:
     """Try to repair every missing private-key path by searching *keys_dir*.
 
     For each key whose stored path does not exist, search *keys_dir*
-    recursively for ``private_key_v{version}.pem`` (preferring a path under a
-    directory matching the project id) and relink it.
+    recursively for ``private_key_v{version}.pem`` candidates and **verify
+    each candidate by deriving its public PEM and comparing against the DB's
+    stored ``Key.public_key_pem``**. Only relink when the cryptographic
+    identity matches — filename + path heuristics are used as an *ordering*
+    hint, not as the matching criterion.
+
+    Why the public-key check: a flat ``keys_dir`` containing one
+    ``private_key_v1.pem`` shared across several projects (or a key restored
+    from backup into the wrong subdirectory) would otherwise be linked to
+    *every* project's v1, silently mis-attributing identity. With the
+    derive-and-compare step, only the project whose v1 actually matches that
+    file gets relinked; the others are reported under ``still_missing``.
 
     Args:
         session: Open SQLAlchemy session (caller commits).
@@ -122,7 +160,22 @@ def auto_relink(session: Session, keys_dir: Path) -> dict:
         if entry["exists"]:
             ok.append({"project_id": entry["project_id"], "version": entry["version"]})
             continue
-        candidate = _find_candidate(keys_dir, entry["project_id"], entry["version"])
+        # Fetch the Key row to get its DB-stored public PEM — this is what
+        # _find_candidate uses to cryptographically verify that a candidate
+        # ``private_key_v{N}.pem`` really belongs to *this* project.
+        key_row = session.execute(
+            select(Key).where(
+                Key.project_id == entry["project_id"],
+                Key.version == entry["version"],
+            )
+        ).scalars().first()
+        expected_pub = key_row.public_key_pem if key_row else None
+        candidate = _find_candidate(
+            keys_dir,
+            entry["project_id"],
+            entry["version"],
+            expected_pub_pem=expected_pub,
+        )
         if candidate is None:
             still_missing.append({
                 "project_id": entry["project_id"],

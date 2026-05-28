@@ -358,6 +358,106 @@ def test_retire_key() -> None:
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_auto_relink_verifies_via_public_key() -> None:
+    """auto_relink must match candidate .pem files by deriving public key,
+    not just by filename.  Regression test for the 'shared keys_dir relinks
+    same file to multiple projects' bug."""
+    print("[auto_relink public-key verification]")
+    from licmgr.core.generate_keys import generate_key_pair
+    sess, data_dir = _fresh_session()
+    fs_root = Path(tempfile.mkdtemp(prefix="licmgr_relink_"))
+    try:
+        # Create two real RSA-2048 key pairs in tempdirs.
+        gen_a = fs_root / "gen_a"
+        gen_b = fs_root / "gen_b"
+        priv_a, pub_a, pem_a, fp_a = generate_key_pair(gen_a, 1)
+        priv_b, pub_b, pem_b, fp_b = generate_key_pair(gen_b, 1)
+        # Sanity check: the two keys are genuinely different.
+        check("two test keys differ", priv_a.read_bytes() != priv_b.read_bytes())
+
+        # Insert two projects, both with a v1 Key whose DB row stores the
+        # corresponding public PEM, and whose private_key_path points to a
+        # non-existent location (so auto_relink will try to repair it).
+        now = datetime(2026, 1, 1)
+        sess.add_all([
+            Project(id="PROJ_A", display_name="A", env_prefix="A",
+                    version="1.0.0", fp_version=1, validity_days=365, created_at=now),
+            Project(id="PROJ_B", display_name="B", env_prefix="B",
+                    version="1.0.0", fp_version=1, validity_days=365, created_at=now),
+        ])
+        sess.flush()
+        sess.add_all([
+            Key(
+                project_id="PROJ_A", version=1, algorithm="rsa2048",
+                public_key_pem=pem_a, public_key_fp=fp_a,
+                private_key_path="/nonexistent/A/private_key_v1.pem",
+                created_at=now,
+            ),
+            Key(
+                project_id="PROJ_B", version=1, algorithm="rsa2048",
+                public_key_pem=pem_b, public_key_fp=fp_b,
+                private_key_path="/nonexistent/B/private_key_v1.pem",
+                created_at=now,
+            ),
+        ])
+        sess.flush()
+
+        # Set up a FLAT keys_dir containing ONLY PROJ_A's private key (the
+        # user's scenario: drop one .pem into ~/.licmgr/projects/ without a
+        # per-project subdir). Filename collides with PROJ_B's expected v1,
+        # but its derived public key only matches PROJ_A.
+        shared_keys_dir = fs_root / "shared_keys"
+        shared_keys_dir.mkdir()
+        target_path = shared_keys_dir / "private_key_v1.pem"
+        shutil.copy2(priv_a, target_path)
+
+        report = dbmaint.auto_relink(sess, shared_keys_dir)
+        sess.commit()
+
+        # PROJ_A should be relinked to the shared .pem.
+        proj_a_relinked = next(
+            (r for r in report["relinked"] if r["project_id"] == "PROJ_A"), None
+        )
+        check("PROJ_A relinked", proj_a_relinked is not None,
+              f"relinked={report['relinked']}")
+        check(
+            "PROJ_A new_path is the shared .pem",
+            proj_a_relinked and Path(proj_a_relinked["new_path"]).resolve()
+                == target_path.resolve(),
+            str(proj_a_relinked) if proj_a_relinked else "—",
+        )
+
+        # PROJ_B must NOT be relinked — the file's derived public key doesn't
+        # match PROJ_B's DB-recorded public PEM, so it stays missing.
+        proj_b_relinked = any(r["project_id"] == "PROJ_B" for r in report["relinked"])
+        check("PROJ_B NOT relinked (different public key)", not proj_b_relinked,
+              f"relinked={report['relinked']}")
+        proj_b_missing = any(
+            r["project_id"] == "PROJ_B" for r in report["still_missing"]
+        )
+        check("PROJ_B reported as still_missing", proj_b_missing,
+              f"still_missing={report['still_missing']}")
+
+        # And drop PROJ_B's real key into a per-project subdir → second pass
+        # should now relink it correctly.
+        proj_b_dir = shared_keys_dir / "PROJ_B" / "keys"
+        proj_b_dir.mkdir(parents=True)
+        shutil.copy2(priv_b, proj_b_dir / "private_key_v1.pem")
+        report2 = dbmaint.auto_relink(sess, shared_keys_dir)
+        sess.commit()
+        b2 = next((r for r in report2["relinked"] if r["project_id"] == "PROJ_B"), None)
+        check("PROJ_B relinked on 2nd pass after correct file placed", b2 is not None)
+        check(
+            "PROJ_B picks the per-project subdir file (not the shared root)",
+            b2 and "PROJ_B" in Path(b2["new_path"]).parts,
+            str(b2) if b2 else "—",
+        )
+    finally:
+        sess.close()
+        shutil.rmtree(fs_root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def main() -> int:
     """Run all tests and report a summary; return non-zero on failure."""
     test_move_to_trash()
@@ -365,6 +465,7 @@ def main() -> int:
     test_delete_key_with_trash_cascade()
     test_delete_project_with_trash()
     test_retire_key()
+    test_auto_relink_verifies_via_public_key()
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

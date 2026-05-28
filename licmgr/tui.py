@@ -610,13 +610,16 @@ def _show_key_tui(project_id: str) -> None:
             value=k.version,
         ))
     choices.append(questionary.Choice("📃 顯示所有版本的公鑰", value="__all__"))
-    choices.append(questionary.Choice(_CANCEL, value=None))
+    # NOTE: questionary's Choice(value=None) silently falls back to the title
+    # at pick time, so we must NOT use value=None for cancel — instead omit
+    # value entirely and compare against the title string explicitly.
+    choices.append(questionary.Choice(_CANCEL))
 
     pick = _ask(lambda: questionary.select(
         f"此專案有 {len(keys)} 個金鑰版本,選擇要顯示哪個公鑰:",
         choices=choices,
     ).ask())
-    if pick is None:
+    if pick in (None, _CANCEL):
         return
     if pick == "__all__":
         for k in keys:
@@ -1137,10 +1140,10 @@ def _pick_one_key(project_id: str, prompt: str = "選擇要使用的金鑰版本
             f"v{k.version}  {tag}  fp={k.public_key_fp[:16]}...",
             value=k.version,
         ))
-    choices.append(questionary.Choice(_CANCEL, value=None))
+    choices.append(questionary.Choice(_CANCEL))
 
     pick = _ask(lambda: questionary.select(prompt, choices=choices).ask())
-    if pick is None:
+    if pick in (None, _CANCEL):
         return None
     return next(k for k in keys if k.version == pick)
 
@@ -1161,9 +1164,9 @@ def _pick_project() -> Project | None:
             value=p.id,
         )
         for p in projects
-    ] + [questionary.Choice(_CANCEL, value=None)]
+    ] + [questionary.Choice(_CANCEL)]
     pid = _ask(lambda: questionary.select("選擇專案：", choices=choices).ask())
-    if not pid:
+    if pid in (None, _CANCEL):
         return None
     return next((p for p in projects if p.id == pid), None)
 
@@ -1219,9 +1222,9 @@ def _delete_license_tui() -> None:
             value=lic.id,
         )
         for lic in lics
-    ] + [questionary.Choice(_CANCEL, value=None)]
+    ] + [questionary.Choice(_CANCEL)]
     pick = _ask(lambda: questionary.select("選擇要硬刪的授權：", choices=choices).ask())
-    if pick is None:
+    if pick in (None, _CANCEL):
         return
 
     lic = next(lic for lic in lics if lic.id == pick)
@@ -1274,9 +1277,9 @@ def _retire_key_tui() -> None:
             value=k.version,
         )
         for k in active
-    ] + [questionary.Choice(_CANCEL, value=None)]
+    ] + [questionary.Choice(_CANCEL)]
     pick = _ask(lambda: questionary.select("選擇要退役的金鑰版本：", choices=choices).ask())
-    if pick is None:
+    if pick in (None, _CANCEL):
         return
 
     confirm = _ask(lambda: questionary.confirm(
@@ -1316,9 +1319,9 @@ def _delete_key_tui() -> None:
             value=k.version,
         )
         for k in keys
-    ] + [questionary.Choice(_CANCEL, value=None)]
+    ] + [questionary.Choice(_CANCEL)]
     pick = _ask(lambda: questionary.select("選擇要硬刪的金鑰版本：", choices=choices).ask())
-    if pick is None:
+    if pick in (None, _CANCEL):
         return
 
     key = next(k for k in keys if k.version == pick)
@@ -1468,9 +1471,11 @@ def _dbmaint_relink() -> None:
         )
         for r in rows
     ]
-    choices.append(questionary.Choice(_CANCEL, value=None))
+    choices.append(questionary.Choice(_CANCEL))
     picked = _ask(lambda: questionary.select("選擇要修復的金鑰：", choices=choices).ask())
-    if not picked:
+    # questionary's Choice(value=None) falls back to the title string at pick
+    # time, so cancel returns _CANCEL ("← 取消"), not None. Must guard both.
+    if picked in (None, _CANCEL):
         return
     project_id, version = picked
     new_path = _ask(lambda: questionary.text("新的私鑰 .pem 路徑：").ask())
