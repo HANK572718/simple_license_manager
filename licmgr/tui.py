@@ -134,33 +134,39 @@ def _print_overview() -> None:
     t.add_column("建立日")
 
     for p, ks, ls in per_project:
-        # Pick the key whose private-key existence drives the icon: prefer the
-        # active key (newest non-retired); fall back to the newest overall.
-        active = next((k for k in ks if k.retired_at is None), None)
-        pick = active or (ks[0] if ks else None)
-
-        if pick is None:
+        if not ks:
             key_col = "—"
             priv_col = "—"
             fp_col = "—"
         else:
-            ver_label = f"v{pick.version}"
-            if active is None:
-                ver_label += " [dim](已退役)[/dim]"
-            elif len(ks) > 1:
-                ver_label += f" [dim](共 {len(ks)})[/dim]"
-            key_col = ver_label
+            # Multi-line cells: one line per key version (list_keys already
+            # returns newest first, so the active key sits at the top).
+            key_lines: list[str] = []
+            priv_lines: list[str] = []
+            fp_lines: list[str] = []
+            for k in ks:
+                tag = (
+                    "[dim](已退役)[/dim]" if k.retired_at
+                    else "[green](使用中)[/green]"
+                )
+                key_lines.append(f"v{k.version} {tag}")
 
-            priv_path = (
-                Path(pick.private_key_path).expanduser()
-                if pick.private_key_path else None
-            )
-            if priv_path and priv_path.is_file():
-                priv_col = "[green]✓ 存在[/green]"
-            else:
-                priv_col = "[red]✗ 遺失[/red]"
+                priv_path = (
+                    Path(k.private_key_path).expanduser()
+                    if k.private_key_path else None
+                )
+                if priv_path and priv_path.is_file():
+                    priv_lines.append("[green]✓ 存在[/green]")
+                else:
+                    priv_lines.append("[red]✗ 遺失[/red]")
 
-            fp_col = (pick.public_key_fp[:16] + "...") if pick.public_key_fp else "—"
+                fp_lines.append(
+                    (k.public_key_fp[:16] + "...") if k.public_key_fp else "—"
+                )
+
+            key_col = "\n".join(key_lines)
+            priv_col = "\n".join(priv_lines)
+            fp_col = "\n".join(fp_lines)
 
         active_lics = sum(1 for lic in ls if not lic.revoked)
         if not ls:
@@ -190,14 +196,147 @@ def _project_menu() -> None:
     while True:
         action = _ask(lambda: questionary.select(
             "📁 專案管理",
-            choices=["列出所有專案", "新增專案", _BACK],
+            choices=["列出所有專案", "🔎  查看專案詳情", "新增專案", _BACK],
         ).ask())
         if action is None or action == _BACK:
             return
         if action == "列出所有專案":
             _list_projects()
+        elif action == "🔎  查看專案詳情":
+            _project_detail_tui()
         elif action == "新增專案":
             _create_project_tui()
+
+
+def _project_detail_tui() -> None:
+    """Drill-down view: pick a project then show its keys + licensed devices.
+
+    Renders three blocks for the picked project:
+      1. Metadata panel (id / name / version / env_prefix / fp_version /
+         validity / created / optional git provenance).
+      2. Keys table — every version with file-existence check, full(ish) public
+         fingerprint, status. No private material printed.
+      3. Licensed-devices table — every license row with the *full* machine
+         fingerprint (64-hex), optional MAC hint, key version it was signed by,
+         issued/expires dates, and active/revoked status. This is the
+         "授權電腦的相關指紋設備資訊" surface.
+
+    Read-only view; press any key to return to the project submenu.
+    """
+    project = _pick_project()
+    if project is None:
+        return
+
+    # ── 1. Metadata panel ────────────────────────────────────────────────────
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", min_width=12)
+    grid.add_column()
+    grid.add_row("專案 ID", project.id)
+    grid.add_row("名稱", project.display_name or "—")
+    grid.add_row("版本", project.version)
+    grid.add_row("環境前綴", project.env_prefix or "—")
+    grid.add_row("指紋版本", str(project.fp_version))
+    grid.add_row("有效天數", f"{project.validity_days} 天")
+    grid.add_row("建立日", project.created_at.strftime("%Y-%m-%d %H:%M:%S"))
+    if project.git_remote:
+        grid.add_row("Git remote", project.git_remote)
+    if project.git_user_name or project.git_user_email:
+        owner = project.git_user_name or "—"
+        if project.git_user_email:
+            owner += f" <{project.git_user_email}>"
+        grid.add_row("建立者", owner)
+    if project.project_root:
+        grid.add_row("Project root", project.project_root)
+    console.print(Panel(
+        grid,
+        title=f"[bold cyan]📁 專案詳情:{project.id}[/bold cyan]",
+        expand=False,
+    ))
+
+    # ── 2. Keys table ────────────────────────────────────────────────────────
+    keys = list_keys(project.id)
+    if not keys:
+        console.print("\n[dim]🔑 此專案尚無金鑰。[/dim]")
+    else:
+        active_count = sum(1 for k in keys if k.retired_at is None)
+        console.print(
+            f"\n[bold]🔑 金鑰 — 共 {len(keys)} 把"
+            f"([green]{active_count}[/green] 使用中 / "
+            f"[red]{len(keys) - active_count}[/red] 退役)[/bold]"
+        )
+        kt = Table(show_header=True, header_style="bold cyan", expand=False)
+        kt.add_column("版本", justify="right")
+        kt.add_column("演算法")
+        kt.add_column("公鑰指紋(前 32)")
+        kt.add_column("私鑰檔", no_wrap=True)
+        kt.add_column("私鑰路徑", overflow="fold")
+        kt.add_column("建立日", no_wrap=True)
+        kt.add_column("狀態", no_wrap=True)
+        for k in keys:
+            priv_path = (
+                Path(k.private_key_path).expanduser()
+                if k.private_key_path else None
+            )
+            if priv_path and priv_path.is_file():
+                priv_col = "[green]✓ 存在[/green]"
+            else:
+                priv_col = "[red]✗ 遺失[/red]"
+            status = "[red]已退役[/red]" if k.retired_at else "[green]使用中[/green]"
+            fp_disp = (k.public_key_fp[:32] + "...") if k.public_key_fp else "—"
+            kt.add_row(
+                str(k.version),
+                k.algorithm,
+                fp_disp,
+                priv_col,
+                k.private_key_path or "—",
+                k.created_at.strftime("%Y-%m-%d"),
+                status,
+            )
+        console.print(kt)
+
+    # ── 3. Licensed devices table ───────────────────────────────────────────
+    lics = list_licenses(project.id)
+    if not lics:
+        console.print("\n[dim]📄 此專案尚無授權紀錄。[/dim]")
+    else:
+        active_lics = sum(1 for lic in lics if not lic.revoked)
+        console.print(
+            f"\n[bold]📄 授權電腦 — 共 {len(lics)} 筆"
+            f"([green]{active_lics}[/green] 有效 / "
+            f"[red]{len(lics) - active_lics}[/red] 撤銷)[/bold]"
+        )
+        lt = Table(show_header=True, header_style="bold cyan", expand=False)
+        lt.add_column("ID", justify="right")
+        lt.add_column("客戶", no_wrap=True)
+        lt.add_column("機器指紋(完整 64 hex)", overflow="fold")
+        lt.add_column("Key 版本", justify="right")
+        lt.add_column("簽發日", no_wrap=True)
+        lt.add_column("到期日", no_wrap=True)
+        lt.add_column("MAC 提示")
+        lt.add_column("狀態", no_wrap=True)
+        for lic in lics:
+            status = "[red]已撤銷[/red]" if lic.revoked else "[green]有效[/green]"
+            expires = (
+                lic.expires_at.strftime("%Y-%m-%d") if lic.expires_at
+                else "[dim]永久[/dim]"
+            )
+            lt.add_row(
+                str(lic.id),
+                lic.client_name or "—",
+                lic.machine_fp,  # 64-hex; rich folds long content per column width
+                str(lic.key_version),
+                lic.issued_at.strftime("%Y-%m-%d"),
+                expires,
+                lic.mac_hint or "[dim]—[/dim]",
+                status,
+            )
+        console.print(lt)
+        console.print(
+            "[dim]提示:'Key 版本' 是簽發時使用的金鑰版本,"
+            "對應上表「🔑 金鑰」。MAC 為審計提示,驗證時不使用。[/dim]"
+        )
+
+    _ask(lambda: questionary.press_any_key_to_continue("按任意鍵返回…").ask())
 
 
 def _list_projects() -> None:
