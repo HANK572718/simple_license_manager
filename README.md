@@ -153,6 +153,24 @@ licmgr
 
 純唯讀視窗，按任意鍵返回。「Key 版本」對應金鑰表，方便追蹤某張 `.lic` 是由哪把金鑰簽出的。
 
+### 多金鑰專案:版本選擇器一致性
+
+任何「操作於某把特定金鑰」的 TUI 流程,若該專案有 2 把以上的金鑰,都會先列出金鑰表並讓使用者**挑版本**,絕不靜默預設最新一把:
+
+| TUI 流程 | 行為(2+ 把金鑰時) | CLI 對應 |
+|---|---|---|
+| 🔑 金鑰管理 → 顯示公鑰 PEM | 挑版本(或選「顯示所有版本」) | `key show <p> [<v>]` / `--all` |
+| 🔑 金鑰管理 → 驗證金鑰配對(私鑰=DB) | 挑要驗證的版本 | `key verify <p> --key-version N` |
+| 🔑 金鑰管理 → 驗證金鑰配對(公鑰=DB 比對) | 挑要比對的 DB 公鑰版本 | (同上) |
+| 📄 授權管理 → 簽發新授權 | 挑要用哪把簽(預設 active,退役需二次確認) | `license issue ... --key-version N` |
+| 📦 SDK 匯出 | 挑要嵌入 SDK 的公鑰版本(預設 active,退役需二次確認) | `sdk export <p> --key-version N` |
+| 🔁 DB 維運 → 退役/刪除金鑰 | 挑要操作的版本(已預設提供) | `key retire`/`key delete <p> <v>` |
+| 📄 授權管理 → 撤銷/匯出/刪除授權 | 挑要操作的 License 紀錄(已預設提供) | `license revoke`/`export`/`delete <id>` |
+
+單把金鑰專案不會跳出版本選單;0 把金鑰時直接報錯提示「請先產生金鑰」。
+
+> 💡 為什麼要這樣設計?**一個專案 → 多把金鑰 → 每把金鑰 → 多張授權**——這是 licmgr 的核心資料模型。任何操作如果靜默選「最新一筆」,在多金鑰並存的場景(例如 v1 仍服務舊客戶、v2 簽新客戶)很容易誤用到錯的金鑰。所有 TUI 操作改成顯式挑選,CLI 也提供對等的 `<version>` 引數或 `--key-version` 旗標,讓自動化腳本與互動操作一致。
+
 ### 初次使用流程（約 2 分鐘）
 
 ```
@@ -293,6 +311,11 @@ poetry licmgr sdk export MY_PROJ --output ./dist/MY_PROJ
 poetry licmgr key show MY_PROJ                     # 預設:active(若有多版會提示)
 poetry licmgr key show MY_PROJ 1                   # 指定版本 v1
 poetry licmgr key show MY_PROJ --all               # 全部版本(含已退役)
+
+# 指定金鑰版本進行其他操作(預設都是 active,--key-version N 可挑特定版本)
+poetry licmgr key verify MY_PROJ --key-version 1 --lic ./customer.lic    # 用 v1 私鑰驗證
+poetry licmgr sdk export MY_PROJ --key-version 1 -o ./dist-legacy        # 嵌 v1 公鑰(老客戶 SDK)
+poetry licmgr license issue MY_PROJ <fingerprint> --key-version 1 -c "..."  # 用 v1 簽授權
 
 # 撤銷與刪除（檔案均搬到 ~/.licmgr/.trash/；--yes 跳過互動確認，給 CI/CD 用）
 poetry licmgr license revoke <license_id>           # 軟刪（保留 row，標記 revoked）

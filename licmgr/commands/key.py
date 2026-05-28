@@ -433,7 +433,10 @@ class KeyVerifyCommand(Command):
     ]
 
     options = [
-        option("--key", None, "Private key .pem path (default: DB-recorded path)",
+        option("--key", None, "Private key .pem path (overrides DB lookup)",
+               flag=False, default=None),
+        option("--key-version", None,
+               "Use the private key recorded for this version (default: active key)",
                flag=False, default=None),
         option("--verify-license", None, "verify_license.py file with embedded PUBLIC_KEY_PEM",
                flag=False, default=None),
@@ -456,16 +459,46 @@ class KeyVerifyCommand(Command):
             self.line_error(f"<error>Project '{project_id}' not found.</error>")
             return 1
 
-        # Resolve the private key.
+        # Resolve the private key. Three sources, in precedence order:
+        #   --key <path>          → use this file directly (overrides DB)
+        #   --key-version N       → use the .private_key_path recorded for v{N}
+        #   (neither)             → use the active key (newest non-retired)
         key_opt = self.option("key")
+        ver_opt = self.option("key-version")
+        if key_opt and ver_opt:
+            self.line_error("<error>--key and --key-version are mutually exclusive.</error>")
+            return 1
+
         if key_opt:
             priv_path = Path(key_opt).expanduser()
+        elif ver_opt is not None:
+            try:
+                want = int(ver_opt)
+            except ValueError:
+                self.line_error("<error>--key-version must be an integer.</error>")
+                return 1
+            keys = list_keys(project_id)
+            picked = next((k for k in keys if k.version == want), None)
+            if picked is None:
+                available = ", ".join(f"v{k.version}" for k in keys) or "(none)"
+                self.line_error(
+                    f"<error>Key v{want} not found for '{project_id}'. "
+                    f"Available: {available}.</error>"
+                )
+                return 1
+            priv_path = Path(picked.private_key_path).expanduser()
         else:
             active = get_active_key(project_id)
             if active is None:
                 self.line_error(f"<error>No active key for '{project_id}'.</error>")
                 return 1
             priv_path = Path(active.private_key_path).expanduser()
+            all_keys = list_keys(project_id)
+            if len(all_keys) > 1:
+                self.line(
+                    f"<comment>Using active key v{active.version}; "
+                    f"--key-version N selects a different version.</comment>"
+                )
         if not priv_path.is_file():
             self.line_error(f"<error>Private key not found: {priv_path}</error>")
             return 1

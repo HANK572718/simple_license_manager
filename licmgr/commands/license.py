@@ -46,10 +46,17 @@ class LicenseIssueCommand(Command):
             flag=False,
             default=None,
         ),
+        option(
+            "--key-version", None,
+            "Sign with this specific key version (default: active key)",
+            flag=False, default=None,
+        ),
     ]
 
     def handle(self) -> int:
         """Execute the command."""
+        from licmgr.core.db.crud import list_keys
+
         init_db()
 
         project_id = self.argument("project-id")
@@ -58,18 +65,48 @@ class LicenseIssueCommand(Command):
         expires_str: str | None = self.option("expires")
         mac_hint: str | None = self.option("mac")
         output_path_raw: str | None = self.option("output")
+        ver_opt = self.option("key-version")
 
         project = get_project(project_id)
         if project is None:
             self.line_error(f"<error>Project '{project_id}' not found.</error>")
             return 1
 
-        key = get_active_key(project_id)
-        if key is None:
-            self.line_error(
-                f"<error>No active key for '{project_id}'. Run 'key generate {project_id}' first.</error>"
-            )
-            return 1
+        # Resolve the signing key: --key-version N picks a specific one (incl.
+        # retired, with a warning); otherwise default to the active key.
+        if ver_opt is not None:
+            try:
+                want = int(ver_opt)
+            except ValueError:
+                self.line_error("<error>--key-version must be an integer.</error>")
+                return 1
+            keys = list_keys(project_id)
+            key = next((k for k in keys if k.version == want), None)
+            if key is None:
+                available = ", ".join(f"v{k.version}" for k in keys) or "(none)"
+                self.line_error(
+                    f"<error>Key v{want} not found for '{project_id}'. "
+                    f"Available: {available}.</error>"
+                )
+                return 1
+            if key.retired_at is not None:
+                self.line(
+                    f"<comment>Note: signing with RETIRED key v{want} "
+                    f"(unusual; defaulting flow would have used the active key).</comment>"
+                )
+        else:
+            key = get_active_key(project_id)
+            if key is None:
+                self.line_error(
+                    f"<error>No active key for '{project_id}'. Run 'key generate {project_id}' first.</error>"
+                )
+                return 1
+            all_keys = list_keys(project_id)
+            if len(all_keys) > 1:
+                self.line(
+                    f"<comment>Signing with active key v{key.version}; "
+                    f"use --key-version N to sign with a different version.</comment>"
+                )
 
         priv_key_path = Path(key.private_key_path)
         if not priv_key_path.exists():

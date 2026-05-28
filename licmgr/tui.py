@@ -658,9 +658,8 @@ def _verify_keypair_tui(default_project_id: str | None = None) -> None:
         if pid is None or pid == _CANCEL:
             return
         chosen_pid = pid
-        key = get_active_key(pid)
+        key = _pick_one_key(pid, "選擇驗證用的金鑰版本(私鑰):")
         if key is None:
-            console.print(f"[red]專案 {pid} 無可用金鑰。[/red]")
             return
         priv_path = Path(key.private_key_path).expanduser()
         if not priv_path.is_file():
@@ -668,7 +667,7 @@ def _verify_keypair_tui(default_project_id: str | None = None) -> None:
             console.print("[dim]提示：可至「🔁  DB 維運 → 修復金鑰路徑」修正。[/dim]")
             return
         priv_pem = priv_path.read_bytes()
-        console.print(f"[dim]私鑰來源：{priv_path}[/dim]")
+        console.print(f"[dim]私鑰來源(v{key.version}):{priv_path}[/dim]")
     else:
         raw = _ask(lambda: questionary.text("私鑰 .pem 路徑：").ask())
         if not raw:
@@ -730,10 +729,10 @@ def _verify_keypair_tui(default_project_id: str | None = None) -> None:
             matched, reason = keycheck.verify_keypair(priv_pem, public_pem=pub)
 
         else:  # DB stored public key
-            key = get_active_key(chosen_pid)
+            key = _pick_one_key(chosen_pid, "選擇要比對的 DB 公鑰版本:")
             if key is None:
-                console.print(f"[red]專案 {chosen_pid} 無可用金鑰。[/red]")
                 return
+            console.print(f"[dim]DB 公鑰來源(v{key.version}):指紋 {key.public_key_fp[:16]}...[/dim]")
             matched, reason = keycheck.verify_keypair(
                 priv_pem, public_pem=key.public_key_pem.encode()
             )
@@ -804,10 +803,18 @@ def _list_licenses_tui(project_id: str) -> None:
 
 def _issue_license_tui(project_id: str) -> None:
     project = get_project(project_id)
-    key = get_active_key(project_id)
+    key = _pick_one_key(project_id, "選擇要用來簽發此授權的金鑰版本:")
     if key is None:
-        console.print("[red]無可用金鑰。請先產生金鑰。[/red]")
         return
+    # The picker returns ANY chosen key (incl. retired). Issuing under a retired
+    # key is unusual — warn but allow, since the operator may have a reason
+    # (e.g. re-issuing an old license for a replacement device).
+    if key.retired_at is not None:
+        warn_ok = _ask(lambda: questionary.confirm(
+            f"v{key.version} 已退役,確定要用它簽發新授權?", default=False
+        ).ask())
+        if not warn_ok:
+            return
     priv_path = Path(key.private_key_path)
     if not priv_path.exists():
         console.print(f"[red]私鑰不存在：{priv_path}[/red]")
@@ -917,10 +924,18 @@ def _sdk_menu() -> None:
         return
 
     project = get_project(pid)
-    key = get_active_key(pid)
+    key = _pick_one_key(pid, "選擇要嵌入 SDK 的公鑰版本:")
     if key is None:
-        console.print("[red]無可用金鑰。請先產生金鑰。[/red]")
         return
+    # Embedding a retired key's public PEM is valid (e.g. shipping SDK for
+    # legacy customers who still hold v1-signed .lic files), just unusual.
+    if key.retired_at is not None:
+        warn_ok = _ask(lambda: questionary.confirm(
+            f"v{key.version} 已退役,確定要用它的公鑰匯出 SDK?",
+            default=False,
+        ).ask())
+        if not warn_ok:
+            return
 
     default_out = str((Path.cwd() / "dist" / pid).resolve())
     out_raw = _ask(lambda: questionary.text("輸出目錄：", default=default_out).ask())
@@ -1090,6 +1105,45 @@ def _dbmaint_menu() -> None:
 
 
 # ── DB 維運：刪除子選單 ───────────────────────────────────────────────────────
+
+def _pick_one_key(project_id: str, prompt: str = "選擇要使用的金鑰版本:") -> Key | None:
+    """Pick a single Key version for *project_id* — used wherever a multi-key
+    project would otherwise silently default to ``get_active_key``.
+
+    Behaviour:
+      * 0 keys  → print an error and return None.
+      * 1 key   → return it directly (no prompt; identical to old UX).
+      * 2+ keys → render the keys table for context, then ``questionary.select``
+        with every version (active first, with status + fp prefix) + cancel.
+
+    Callers should always use this instead of ``get_active_key`` for any action
+    that operates on a *specific* key (verify, SDK embed, license sign,
+    show-pubkey, …). Returns ``None`` on cancel or no-keys.
+    """
+    keys = list_keys(project_id)
+    if not keys:
+        console.print(f"[red]專案 {project_id} 無可用金鑰。請先產生金鑰。[/red]")
+        return None
+    if len(keys) == 1:
+        return keys[0]
+
+    _list_keys_tui(project_id)
+    # First entry is the newest (list_keys returns DESC by version) — typically
+    # the active one, so it naturally becomes questionary's default highlight.
+    choices: list = []
+    for k in keys:
+        tag = "[已退役]" if k.retired_at else "[使用中]"
+        choices.append(questionary.Choice(
+            f"v{k.version}  {tag}  fp={k.public_key_fp[:16]}...",
+            value=k.version,
+        ))
+    choices.append(questionary.Choice(_CANCEL, value=None))
+
+    pick = _ask(lambda: questionary.select(prompt, choices=choices).ask())
+    if pick is None:
+        return None
+    return next(k for k in keys if k.version == pick)
+
 
 def _pick_project() -> Project | None:
     """Shared helper: let the user pick one project from the registry.

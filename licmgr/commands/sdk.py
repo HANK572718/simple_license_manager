@@ -6,7 +6,7 @@ from pathlib import Path
 from cleo.commands.command import Command
 from cleo.helpers import argument, option
 
-from licmgr.core.db.crud import get_active_key, get_project
+from licmgr.core.db.crud import get_active_key, get_project, list_keys
 from licmgr.core.db.engine import init_db
 
 # Template files are bundled inside the package at licmgr/data/client_sdk/
@@ -35,6 +35,11 @@ class SdkExportCommand(Command):
             default=None,
         ),
         option("--no-guide", None, "Skip copying the integration guide", flag=True),
+        option(
+            "--key-version", None,
+            "Embed this specific key version's public PEM (default: active key)",
+            flag=False, default=None,
+        ),
     ]
 
     def handle(self) -> int:
@@ -47,12 +52,40 @@ class SdkExportCommand(Command):
             self.line_error(f"<error>Project '{project_id}' not found.</error>")
             return 1
 
-        key = get_active_key(project_id)
-        if key is None:
-            self.line_error(
-                f"<error>No active key for '{project_id}'. Run 'key generate {project_id}' first.</error>"
-            )
-            return 1
+        ver_opt = self.option("key-version")
+        if ver_opt is not None:
+            try:
+                want = int(ver_opt)
+            except ValueError:
+                self.line_error("<error>--key-version must be an integer.</error>")
+                return 1
+            keys = list_keys(project_id)
+            key = next((k for k in keys if k.version == want), None)
+            if key is None:
+                available = ", ".join(f"v{k.version}" for k in keys) or "(none)"
+                self.line_error(
+                    f"<error>Key v{want} not found for '{project_id}'. "
+                    f"Available: {available}.</error>"
+                )
+                return 1
+            if key.retired_at is not None:
+                self.line(
+                    f"<comment>Note: embedding RETIRED key v{want}'s public PEM "
+                    f"(useful for legacy customers; unusual otherwise).</comment>"
+                )
+        else:
+            key = get_active_key(project_id)
+            if key is None:
+                self.line_error(
+                    f"<error>No active key for '{project_id}'. Run 'key generate {project_id}' first.</error>"
+                )
+                return 1
+            all_keys = list_keys(project_id)
+            if len(all_keys) > 1:
+                self.line(
+                    f"<comment>Embedding active key v{key.version}; "
+                    f"use --key-version N to embed a different version.</comment>"
+                )
 
         output_raw = self.option("output")
         out_dir = Path(output_raw) if output_raw else Path.cwd() / "dist" / project_id
