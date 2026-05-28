@@ -98,12 +98,23 @@ poetry self add git+https://github.com/HANK572718/simple_license_manager.git   #
 licmgr
 ```
 
-將出現帶箭頭選擇的互動式主選單：
+啟動後會**先顯示一張即時總覽表**（見下），然後出現帶箭頭選擇的互動式主選單：
 
 ```
 ╭─ licmgr — 離線授權管理工具 ──────╮
 │  RSA-2048 + SQLite  |  Apache 2.0  │
 ╰────────────────────────────────────╯
+
+╭─ licmgr 總覽 ────────────────────────────────────────────────────╮
+│ 專案數: 2   金鑰數: 2 (可用 2 / 退役 0)   授權數: 5 (有效 5 / 撤銷 0) │
+╰────────────────────────────────────────────────────────────────╯
+
+┌──────────────────────┬──────────────────────┬───────┬──────┬────────┬────────────────┬───────┬────────────┐
+│ 專案                 │ 名稱                 │ 版本  │ 金鑰 │ 私鑰檔 │ 公鑰指紋(前16) │ 授權  │ 建立日     │
+├──────────────────────┼──────────────────────┼───────┼──────┼────────┼────────────────┼───────┼────────────┤
+│ GIT_SmartSOPGuardian │ GIT_SmartSOPGuardian │ 1.0.0 │ v1   │ ✓ 存在 │ a1b2c3d4...    │ 4 (4/0)│ 2026-05-20 │
+│ TEST_CLI             │ CLI Test Project     │ 1.0.0 │ v1   │ ✗ 遺失 │ 9f8e7d6c...    │ 1 (1/0)│ 2026-05-25 │
+└──────────────────────┴──────────────────────┴───────┴──────┴────────┴────────────────┴───────┴────────────┘
 
 ? 主選單
   > 📁  專案管理      — 建立 / 列出專案
@@ -111,12 +122,27 @@ licmgr
     📄  授權管理      — 簽發 / 撤銷 / 匯出授權（一台機器一份）
     📦  SDK 匯出      — 匯出含公鑰的驗證整合包
     📥  匯入舊資料庫  — 從舊 licmgr DB 匯入紀錄
+    🔁  DB 維運        — 檢查 / 修復金鑰路徑、選擇性匯出、🗑 刪除（專案 / 金鑰 / 授權）
     ⚙   設定          — 修改路徑設定
     ❓  說明          — 功能介紹與概念說明
     🚪  離開
 ```
 
 用 **↑↓ 方向鍵** 選擇，**Enter** 確認，所有操作均有引導提示。
+
+### 🔎 進入即顯示的總覽
+
+每次啟動 `licmgr`（或 `poetry licmgr`）都會自動印出上面那張總覽表，從子選單返回主選單時也會重畫。內容刻意精簡（**不顯示金鑰內容**），重點包含：
+
+| 欄位 | 來源 | 用途 |
+|------|------|------|
+| 專案 / 名稱 / 版本 / 建立日 | `projects` 表 | 識別專案 |
+| 金鑰 | active key 版本 + 總筆數 | 一眼掌握目前用哪把金鑰 |
+| **私鑰檔** ✓ 存在 / ✗ 遺失 | 對 `keys.private_key_path` 做 `Path.is_file()` 檢查 | **DB 紀錄路徑與磁碟實際狀況不一致時立即發現**（最常見：路徑被搬走、檔案被刪、誤連到別台機器的舊路徑） |
+| 公鑰指紋(前16) | `keys.public_key_fp[:16]` | 比對你手上的 `.lic` / `verify_license.py` 是否來自同一把 |
+| 授權 | `len(licenses) (有效/撤銷)` | 看出哪些專案還活著 |
+
+`✗ 遺失` 出現時，可進「🔁 DB 維運 → 修復金鑰路徑」用 auto-relink 自動修。
 
 ### 初次使用流程（約 2 分鐘）
 
@@ -138,6 +164,23 @@ licmgr → ⚙ 設定
 ```
 
 可在 TUI 內直接修改並儲存 DB 路徑、金鑰目錄、授權檔目錄，設定寫入當前目錄的 `licmgr.toml`。
+
+### 🗑 DB 維運 → 刪除維運（分層刪除 + 回收區）
+
+在「🔁 DB 維運」底下提供分層刪除：
+
+| 動作 | DB 行為 | 檔案處置 | 確認機制 | 可逆? |
+|------|---------|----------|----------|-------|
+| **刪除授權紀錄**（License） | 硬刪 row（不同於 revoke 軟標記） | `.lic` 搬到回收區 | 一次 y/n | 從回收區手動還原檔；DB row 不可還原 |
+| **退役金鑰版本**（Key） | `retired_at` 設為 now | **不動檔案** | 一次 y/n | ✓ 直接把 `retired_at` 改回 None |
+| **刪除金鑰版本**（Key） | 硬刪 Key + cascade 硬刪所有引用該版本的 License（含已撤銷者） | `.pem` / `.lic` 搬到回收區 | 一次 y/n（會顯示連動影響數量） | 同上 |
+| **刪除專案**（Project） | 硬刪 Project + ORM cascade 連帶刪除所有 Keys / Licenses | 整個專案的 `.pem` / `.lic` 搬到回收區 | **必須完整鍵入 project_id** | 同上 |
+
+**回收區**：所有刪除的檔案會搬到 `~/.licmgr/.trash/YYYYMMDD-HHMMSS-<label>-<rand>/`，保留原來最後三層的目錄結構，方便 `mv` 還原。`~/.licmgr/` 本來就不在任何 git repo 內，所以回收區絕不會被 commit。
+
+> ⚠️ 「刪除金鑰」是 **cascade 硬刪**：會把該 key 簽過的所有 license 一併硬刪，包含已撤銷的。若只是想換金鑰但保留歷史紀錄，請改用「**退役金鑰版本**」(可逆、不刪檔)。
+
+非互動 CLI 用同樣的 CRUD（見下節「Poetry Plugin 非互動命令」）。
 
 ---
 
@@ -203,11 +246,19 @@ licenses_dir = ""
 安裝後也可用 `poetry licmgr` 執行非互動命令，適合 CI/CD 腳本：
 
 ```bash
+# 建立與簽發
 poetry licmgr project create MY_PROJ "My Project" MYPROJ
 poetry licmgr key generate MY_PROJ
 poetry licmgr license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires 2027-12-31
 poetry licmgr license list MY_PROJ
 poetry licmgr sdk export MY_PROJ --output ./dist/MY_PROJ
+
+# 撤銷與刪除（檔案均搬到 ~/.licmgr/.trash/；--yes 跳過互動確認，給 CI/CD 用）
+poetry licmgr license revoke <license_id>           # 軟刪（保留 row，標記 revoked）
+poetry licmgr license delete <license_id> --yes     # 硬刪 row + 搬 .lic 到回收區
+poetry licmgr key retire MY_PROJ 1                  # 軟退役金鑰 v1（可逆，不刪檔）
+poetry licmgr key delete  MY_PROJ 1 --yes           # cascade 硬刪 key v1 + 其下所有 license
+poetry licmgr project delete MY_PROJ --yes          # 核彈級：cascade 刪整個專案 + 所有檔案搬回收區
 ```
 
 典型 GitHub Actions 用法：
