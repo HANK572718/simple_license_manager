@@ -767,6 +767,35 @@ rich-deploy sdk export DEMO                   # 匯出 SDK 給甲方
 
 **立即解法**：把私鑰檔放到本機，再改 db 的路徑（見下「操作 `registry.db`」的 `UPDATE`）。
 
+### 從既有私鑰導入（導出公鑰、重建 DB 列）
+
+當你**手上只有一把舊私鑰 `.pem`**（例如從別台機器或備份找回的 `private_key_v1.pem`），但本機 `registry.db` 缺對應的列、或列壞了，可以直接「導入」：licmgr 會從私鑰**推導出公鑰**並重建 `keys`（必要時連 `projects`）列，**不需要重新產生金鑰**。
+
+- **TUI**：`licmgr → 🔑 金鑰管理 →（選任一專案）→ 📥 導入既有私鑰`。先輸入私鑰路徑，再選「既有專案」或輸入「新專案 ID」。
+- **CLI**：
+
+  ```bash
+  poetry licmgr key import <PROJECT_ID> /path/to/private_key_v1.pem \
+      [--version 1] [--env-prefix MY_PREFIX] [--no-create-project]
+  ```
+
+**導出的公鑰與原始公鑰位元組完全相同**（同一組金鑰對），所以：先前用這把私鑰簽發的 `.lic` **仍然有效、整合端的 `verify_license.py` 也不必動**，不需要重簽。推導方式與 `key generate` 完全一致（`load_pem_private_key` → `public_bytes(SubjectPublicKeyInfo)` → `sha256` 指紋），確保位元組層級相符。
+
+會**自動填好**（可從私鑰推導的欄位）：
+
+- `public_key_pem`（推導的公鑰）、`public_key_fp`（上述 sha256 指紋）、`private_key_path`（傳入 `.pem` 的絕對路徑）。
+- 並會在私鑰旁順手寫一份 `public_key_v{version}.pem` 方便取用。
+
+會**提示輸入**：
+
+- `env_prefix`（建新專案時，**預設 = 專案 ID**）。**不會留空**，因為它驅動整合端的 `<PREFIX>_LICENSE_FILE` 環境變數來定位授權檔；導入到既有專案時沿用該專案原值。
+
+會**留空（None）**：`git_remote`／`project_root`／`git_user_name`／`git_user_email` 等非衍生的 git 來源欄位（無法從私鑰得知）。
+
+**冪等／修復語義**：`(project_id, version)` 已存在 → 更新該列的 `public_key_pem`／`public_key_fp`／`private_key_path`；專案在但金鑰版本不在 → 新增金鑰列；專案不存在 → 以上述預設新建（除非 `--no-create-project`）。導入到**既有專案**且其已存公鑰時，若推導出的公鑰與既存不同會**警告**（代表很可能拿錯私鑰）。
+
+> ⚠️ **不會重建已簽授權歷史**：`licenses` 列（已發出的 `.lic`、機器指紋）無法從私鑰反推，導入時**完全不動 `licenses`**。若也要找回舊的已簽授權，請另外把舊 `.lic` 重新匯入（見「📥 匯入舊資料庫」）。
+
 ### 開啟與操作 `registry.db`（SQLite）
 
 **先確認你動的是哪個 db**：預設 `~/.licmgr/registry.db`；但若**當前目錄有 `licmgr.toml`** 且設了 `[database].url`，會以它為準（本 repo 自帶的 `licmgr.toml` 指向相對路徑 `sqlite:///db/registry.db`）。用 `licmgr → ⚙ 設定` 可看到目前生效的 DB 路徑。
