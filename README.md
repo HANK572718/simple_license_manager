@@ -191,6 +191,33 @@ licmgr → ⚙ 設定
 
 非互動 CLI 用同樣的 CRUD（見下節「Poetry Plugin 非互動命令」）。
 
+### 「退役 / 撤銷 / 刪除」三種停用語意對照
+
+很容易搞混，這節把三種「讓某把金鑰／某張授權不再使用」的動作攤平比較：
+
+| 動作 | 對象 | DB 變化 | 磁碟檔案 | 對既有 `.lic` 的影響 | 對下次 `license issue` 的影響 | 仍出現在 list / 總覽 / 詳情? |
+|---|---|---|---|---|---|---|
+| **退役 (retire)** | Key 版本 | `keys.retired_at = now`，row 保留 | **不動** | 無（客戶端用 SDK 內嵌的公鑰驗證，不查 DB） | 自動改用下一把 `retired_at IS NULL` 的版本 | ✓ 顯示為「已退役」 |
+| **撤銷 (revoke)** | License 紀錄 | `licenses.revoked = True` + `revoked_at = now`，row 保留 | **不動** | DB 層被標記為撤銷；但客戶端仍能用 RSA 簽章驗證（離線授權的本質侷限——撤銷是給內部追蹤用） | 不影響 | ✓ 顯示為「已撤銷」 |
+| **刪除 (delete)** | License / Key / Project | row **硬刪**；Key 刪除會 cascade 一併硬刪其下所有 License rows；Project 刪除則 cascade 連 keys 一起 | **搬到 `~/.licmgr/.trash/`**（可手動 `mv` 還原） | 對應 `.lic` 也被搬到 trash | 沒有 row 可選；要重新 `key generate` | ✗ 從 DB 消失 |
+
+**判斷流程:**
+
+```
+要把某把金鑰換掉，但客戶手上的舊 .lic 還在用？
+  → 退役舊版 + key generate 新版（最安全，預設選這個）
+
+要清掉某張授權的 DB 紀錄（例如客戶離職、機器報廢）？
+  → 撤銷（保留審計紀錄） 或 license delete（連 .lic 檔搬走，徹底清乾淨）
+
+要砍掉整個專案（測試專案、合約結束）？
+  → project delete（會 cascade 把 keys + licenses + 全部檔案都搬去 trash）
+```
+
+**目前限制(誠實聲明):**
+- `retire` / `revoke` 在 schema 層面**可逆**(把 `retired_at` / `revoked` 改回原值即可),但**目前沒有 UI/CLI 的反向操作指令**。要還原必須用 sqlite CLI 直接改 DB(`UPDATE keys SET retired_at = NULL WHERE …`)。
+- `delete` 動作對檔案是可逆的(從 `~/.licmgr/.trash/` 手動 `mv` 回來),但 **DB row 不可還原**。
+
 ---
 
 ## 預設儲存路徑
