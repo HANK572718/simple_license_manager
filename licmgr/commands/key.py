@@ -195,28 +195,101 @@ class KeyListCommand(Command):
 
 
 class KeyShowCommand(Command):
-    """Print the active public key PEM for a project."""
+    """Print a project's public-key PEM (active by default; pass a version or --all for others)."""
 
     name = "key show"
-    description = "Print the active public key PEM for a project"
+    description = (
+        "Print public-key PEM for a project. Default (no version): active "
+        "(newest non-retired) key only. Pass a version positional to print a "
+        "specific version, or --all to print every key version (incl. retired)."
+    )
 
+    # Positional 'version' is optional — cleo accepts an optional argument via
+    # the `optional=True` keyword. Mirrors 'key delete <project-id> <version>'
+    # except the version here is optional. Avoiding --version because Poetry/
+    # cleo reserves that long option globally (--version, -v, -V).
     arguments = [
         argument("project-id", "Project identifier"),
+        argument(
+            "version",
+            "Optional: key version to print (default: active key)",
+            optional=True,
+        ),
     ]
+
+    options = [
+        option(
+            "--all", None,
+            "Print every key version's public PEM (active + retired)",
+            flag=True,
+        ),
+    ]
+
+    def _print_key_block(self, key, project_id: str) -> None:
+        """Render one key as a labelled PEM block (no private material involved)."""
+        status = "retired" if key.retired_at else "active"
+        self.line(
+            f"<info>Key v{key.version} ({status}) for '{project_id}' — "
+            f"fp={key.public_key_fp[:16]}...</info>"
+        )
+        self.line(key.public_key_pem)
 
     def handle(self) -> int:
         """Execute the command."""
         init_db()
 
         project_id = self.argument("project-id")
-        key = get_active_key(project_id)
+        want_all = self.option("all")
+        ver_arg = self.argument("version")
 
-        if key is None:
-            self.line_error(f"<error>No active key found for '{project_id}'.</error>")
+        if want_all and ver_arg:
+            self.line_error("<error>Pass either a version argument or --all, not both.</error>")
             return 1
 
-        self.line(f"<info>Active key v{key.version} for '{project_id}':</info>")
-        self.line(key.public_key_pem)
+        keys = list_keys(project_id)
+        if not keys:
+            self.line_error(f"<error>No keys found for '{project_id}'.</error>")
+            return 1
+
+        if want_all:
+            for k in keys:
+                self._print_key_block(k, project_id)
+            return 0
+
+        if ver_arg is not None:
+            try:
+                want_ver = int(ver_arg)
+            except ValueError:
+                self.line_error("<error>version must be an integer.</error>")
+                return 1
+            target = next((k for k in keys if k.version == want_ver), None)
+            if target is None:
+                available = ", ".join(f"v{k.version}" for k in keys)
+                self.line_error(
+                    f"<error>Key v{want_ver} not found for '{project_id}'. "
+                    f"Available: {available}.</error>"
+                )
+                return 1
+            self._print_key_block(target, project_id)
+            return 0
+
+        # Default (no version, no --all): active key, with a hint when more versions exist.
+        active = get_active_key(project_id)
+        if active is None:
+            self.line_error(
+                f"<error>No active key found for '{project_id}' "
+                f"(all {len(keys)} key version(s) are retired). "
+                f"Pass a version (e.g. 'key show {project_id} 1') or --all "
+                f"to print retired keys.</error>"
+            )
+            return 1
+        self._print_key_block(active, project_id)
+        if len(keys) > 1:
+            self.line(
+                f"<comment>Note: this project has {len(keys)} key versions. "
+                f"Use --all to print every PEM, or 'key show {project_id} N' "
+                f"for a specific one.</comment>"
+            )
         return 0
 
 

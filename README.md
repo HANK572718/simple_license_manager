@@ -253,6 +253,11 @@ poetry licmgr license issue MY_PROJ <fingerprint> --client "Acme Corp" --expires
 poetry licmgr license list MY_PROJ
 poetry licmgr sdk export MY_PROJ --output ./dist/MY_PROJ
 
+# 顯示公鑰 — 預設是 active(最新可用);多版時用版本號或 --all
+poetry licmgr key show MY_PROJ                     # 預設:active(若有多版會提示)
+poetry licmgr key show MY_PROJ 1                   # 指定版本 v1
+poetry licmgr key show MY_PROJ --all               # 全部版本(含已退役)
+
 # 撤銷與刪除（檔案均搬到 ~/.licmgr/.trash/；--yes 跳過互動確認，給 CI/CD 用）
 poetry licmgr license revoke <license_id>           # 軟刪（保留 row，標記 revoked）
 poetry licmgr license delete <license_id> --yes     # 硬刪 row + 搬 .lic 到回收區

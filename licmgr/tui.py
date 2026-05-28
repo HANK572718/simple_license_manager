@@ -428,13 +428,63 @@ def _import_key_tui() -> None:
     )
 
 
+def _print_one_public_key(key) -> None:
+    """Print one Key's public PEM with a labelled banner.
+
+    Public key material is safe to display — only private keys are sensitive.
+    """
+    status_tag = (
+        " [dim](已退役)[/dim]" if key.retired_at
+        else " [green](使用中)[/green]"
+    )
+    console.print(
+        f"\n[cyan]v{key.version} 公鑰 PEM{status_tag}  "
+        f"指紋: {key.public_key_fp[:16]}...[/cyan]"
+    )
+    console.print(key.public_key_pem)
+
+
 def _show_key_tui(project_id: str) -> None:
-    key = get_active_key(project_id)
-    if key is None:
+    """Show public key PEM(s).
+
+    Behaviour:
+      * 0 keys  → error message.
+      * 1 key   → print directly (no extra prompt — preserves prior UX).
+      * 2+ keys → show the keys table for context, then ask the user to pick
+        a specific version *or* "show every version".
+    """
+    keys = list_keys(project_id)
+    if not keys:
         console.print("[yellow]無可用金鑰。請先產生金鑰。[/yellow]")
         return
-    console.print(f"[cyan]v{key.version} 公鑰 PEM（可安全公開）：[/cyan]")
-    console.print(key.public_key_pem)
+    if len(keys) == 1:
+        _print_one_public_key(keys[0])
+        return
+
+    # Multiple keys: list-for-context, then pick.
+    _list_keys_tui(project_id)
+    choices = []
+    for k in keys:
+        tag = "[已退役]" if k.retired_at else "[使用中]"
+        choices.append(questionary.Choice(
+            f"v{k.version}  {tag}  fp={k.public_key_fp[:16]}...",
+            value=k.version,
+        ))
+    choices.append(questionary.Choice("📃 顯示所有版本的公鑰", value="__all__"))
+    choices.append(questionary.Choice(_CANCEL, value=None))
+
+    pick = _ask(lambda: questionary.select(
+        f"此專案有 {len(keys)} 個金鑰版本,選擇要顯示哪個公鑰:",
+        choices=choices,
+    ).ask())
+    if pick is None:
+        return
+    if pick == "__all__":
+        for k in keys:
+            _print_one_public_key(k)
+    else:
+        target = next(k for k in keys if k.version == pick)
+        _print_one_public_key(target)
 
 
 def _verify_keypair_tui(default_project_id: str | None = None) -> None:
