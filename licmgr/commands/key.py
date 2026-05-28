@@ -220,6 +220,133 @@ class KeyShowCommand(Command):
         return 0
 
 
+class KeyDeleteCommand(Command):
+    """Hard-delete a key version (cascades to all licenses signed by it)."""
+
+    name = "key delete"
+    description = (
+        "Hard-delete a key version AND every license that was signed by it. "
+        "Private/public key .pem files and dependent .lic files are moved to "
+        "~/.licmgr/.trash/. Irreversible (file recovery requires mv from trash)."
+    )
+
+    arguments = [
+        argument("project-id", "Project identifier"),
+        argument("version", "Key version (integer; see 'key list')"),
+    ]
+
+    options = [
+        option("--yes", "-y", "Skip the confirmation prompt (for CI/CD use)", flag=True),
+    ]
+
+    def handle(self) -> int:
+        """Execute the command."""
+        from sqlalchemy import select
+        from licmgr.core import dbmaint
+        from licmgr.core.db.engine import get_session
+        from licmgr.core.db.models import Key, License
+
+        init_db()
+        project_id = self.argument("project-id")
+        try:
+            version = int(self.argument("version"))
+        except ValueError:
+            self.line_error("<error>version must be an integer.</error>")
+            return 1
+
+        # Pre-check: confirm key exists and report dependent licenses.
+        with get_session() as s:
+            key = s.execute(
+                select(Key).where(Key.project_id == project_id, Key.version == version)
+            ).scalar_one_or_none()
+            if key is None:
+                self.line_error(
+                    f"<error>Key v{version} for '{project_id}' not found.</error>"
+                )
+                return 1
+            dep = s.execute(
+                select(License).where(
+                    License.project_id == project_id,
+                    License.key_version == version,
+                )
+            ).scalars().all()
+            dep_count = len(dep)
+            active_dep = sum(1 for lic in dep if not lic.revoked)
+
+        self.line(f"Key v{version} ({key.algorithm}) of '{project_id}'")
+        self.line(f"  private key file: {key.private_key_path or '(none recorded)'}")
+        self.line(f"  dependent licenses: {dep_count} ({active_dep} active, {dep_count - active_dep} revoked)")
+        if dep_count:
+            self.line(
+                "<comment>These dependent licenses will also be hard-deleted "
+                "and their .lic files moved to trash.</comment>"
+            )
+
+        if not self.option("yes"):
+            ok = self.confirm(
+                f"Permanently delete key v{version} and {dep_count} license(s)?",
+                default=False,
+            )
+            if not ok:
+                self.line("<comment>Aborted.</comment>")
+                return 0
+
+        with get_session() as s:
+            report = dbmaint.delete_key_with_trash(s, project_id, version)
+        if report is None:
+            self.line_error(
+                f"<error>Key v{version} for '{project_id}' not found.</error>"
+            )
+            return 1
+        self.line(
+            f"<info>Key v{version} deleted "
+            f"(licenses removed: {len(report['deleted_licenses'])}).</info>"
+        )
+        if report["trash_dir"]:
+            self.line(f"  files moved → {report['trash_dir']}")
+        return 0
+
+
+class KeyRetireCommand(Command):
+    """Soft-retire a key version (sets retired_at; reversible; no files touched)."""
+
+    name = "key retire"
+    description = (
+        "Mark a key version as retired (sets retired_at to now). Reversible — "
+        "no files are touched, no licenses are deleted. New 'key generate' calls "
+        "will bump to the next version. Use this instead of 'key delete' when "
+        "you want to roll a key forward but keep history intact."
+    )
+
+    arguments = [
+        argument("project-id", "Project identifier"),
+        argument("version", "Key version (integer; see 'key list')"),
+    ]
+
+    def handle(self) -> int:
+        """Execute the command."""
+        from licmgr.core import dbmaint
+        from licmgr.core.db.engine import get_session
+
+        init_db()
+        project_id = self.argument("project-id")
+        try:
+            version = int(self.argument("version"))
+        except ValueError:
+            self.line_error("<error>version must be an integer.</error>")
+            return 1
+
+        with get_session() as s:
+            ok = dbmaint.retire_key(s, project_id, version)
+        if not ok:
+            self.line_error(
+                f"<error>Key v{version} for '{project_id}' not found, or already retired.</error>"
+            )
+            return 1
+        self.line(f"<info>Key v{version} of '{project_id}' retired.</info>")
+        return 0
+
+
 class KeyVerifyCommand(Command):
     """Verify that a project's private key matches a public key / license."""
 

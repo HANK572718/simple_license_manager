@@ -104,6 +104,72 @@ class ProjectCreateCommand(Command):
         return 0
 
 
+class ProjectDeleteCommand(Command):
+    """Hard-delete a project — cascades to every key and license; nuclear option."""
+
+    name = "project delete"
+    description = (
+        "PERMANENTLY delete a project, all of its keys, and all of its licenses. "
+        "All .pem and .lic files are moved to ~/.licmgr/.trash/. By default, "
+        "asks the operator to retype the project id; --yes skips that prompt for "
+        "CI/CD use (the trash move still happens). Irreversible — file recovery "
+        "requires mv from trash."
+    )
+
+    arguments = [
+        argument("project-id", "Project identifier"),
+    ]
+
+    options = [
+        option("--yes", "-y", "Skip the typed-id confirmation (for CI/CD use)", flag=True),
+    ]
+
+    def handle(self) -> int:
+        """Execute the command."""
+        from licmgr.core import dbmaint
+        from licmgr.core.db.crud import list_keys, list_licenses
+        from licmgr.core.db.engine import get_session
+
+        init_db()
+        project_id = self.argument("project-id")
+        project = get_project(project_id)
+        if project is None:
+            self.line_error(f"<error>Project '{project_id}' not found.</error>")
+            return 1
+
+        keys = list_keys(project_id)
+        lics = list_licenses(project_id)
+        self.line(f"Project '{project_id}' — {project.display_name}")
+        self.line(f"  keys to be removed     : {len(keys)}")
+        self.line(f"  licenses to be removed : {len(lics)}")
+        self.line(
+            "<comment>All .pem and .lic files for this project will be moved to "
+            "~/.licmgr/.trash/.</comment>"
+        )
+
+        if not self.option("yes"):
+            typed = self.ask(
+                f"To confirm, retype the project id exactly ('{project_id}'):", ""
+            )
+            if typed != project_id:
+                self.line_error("<error>Confirmation failed — id mismatch. Aborted.</error>")
+                return 1
+
+        with get_session() as s:
+            report = dbmaint.delete_project_with_trash(s, project_id)
+        if report is None:
+            self.line_error(f"<error>Project '{project_id}' not found.</error>")
+            return 1
+        self.line(
+            f"<info>Project '{project_id}' deleted — "
+            f"{len(report['deleted_keys'])} key(s), "
+            f"{len(report['deleted_licenses'])} license(s) removed.</info>"
+        )
+        if report["trash_dir"]:
+            self.line(f"  files moved → {report['trash_dir']}")
+        return 0
+
+
 class ProjectListCommand(Command):
     """List all projects in the licmgr registry."""
 

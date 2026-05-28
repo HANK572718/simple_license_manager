@@ -1,10 +1,11 @@
-"""Database maintenance helpers: key-path relink and selective export.
+"""Database maintenance helpers: key-path relink, selective export, and delete.
 
 These functions operate on a SQLAlchemy ``Session`` (so callers control the
 transaction and, in tests, can point at a throw-away copy of the DB). They keep
 all SQL/file logic out of the TUI so they can be unit tested directly.
 """
 
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,13 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .db.engine import LICMGR_DATA_DIR
 from .db.models import Base, Key, License, Project
+
+# Trash subdirectory under ~/.licmgr/ where deleted artifacts are moved.
+# Keeps deletions reversible (operator can mv files back) without polluting the
+# working set; ~/.licmgr/ is not in any git repo so this never leaks.
+TRASH_DIR_NAME = ".trash"
 
 
 # ── Scan / relink ───────────────────────────────────────────────────────────
@@ -299,3 +306,252 @@ def export_subset(
         "skipped_licenses": skipped_licenses,
         "exported_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+# ── Delete: trash + cascading hard delete ────────────────────────────────────
+
+
+def _trash_root(data_dir: Path | None = None) -> Path:
+    """Return the trash root directory (default ``~/.licmgr/.trash/``).
+
+    The optional *data_dir* override is for tests that want an isolated location.
+    """
+    return Path(data_dir or LICMGR_DATA_DIR) / TRASH_DIR_NAME
+
+
+def move_to_trash(
+    paths: list[Path | str],
+    label: str = "delete",
+    data_dir: Path | None = None,
+) -> tuple[Path | None, list[tuple[Path, Path]]]:
+    """Move existing *paths* to a timestamped subdir under the trash root.
+
+    Non-existent paths are silently skipped (treated as already cleaned up). A
+    *label* is embedded in the subdir name so the operator can tell what kind of
+    delete produced it (e.g. ``20260528-103014-project-DEMO-a1b2``).
+
+    Args:
+        paths: Files OR directories to move. Strings are accepted for convenience.
+        label: Short tag (e.g. ``project-DEMO``) included in the subdir name.
+        data_dir: Optional override for the data dir (tests).
+
+    Returns:
+        Tuple of (trash subdir, list of (src, dst) pairs). When nothing existed
+        to move, returns ``(None, [])`` — useful so callers can report cleanly.
+    """
+    existing: list[Path] = []
+    for p in paths:
+        if not p:
+            continue
+        path = Path(p).expanduser()
+        if path.exists() or path.is_symlink():
+            existing.append(path)
+    if not existing:
+        return None, []
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    rand = os.urandom(2).hex()
+    trash_dir = _trash_root(data_dir) / f"{ts}-{label}-{rand}"
+    trash_dir.mkdir(parents=True, exist_ok=True)
+
+    moved: list[tuple[Path, Path]] = []
+    for src in existing:
+        # Preserve up to the last 3 path components for human readability.
+        rel = Path(*src.parts[-3:]) if len(src.parts) >= 3 else Path(src.name)
+        dst = trash_dir / rel
+        # If a previous move in this same batch already created the parent, fine.
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        # If by chance dst already exists (rare in a per-second-timestamped dir),
+        # disambiguate to avoid losing data silently.
+        if dst.exists():
+            dst = dst.with_name(dst.name + f".{os.urandom(2).hex()}")
+        shutil.move(str(src), str(dst))
+        moved.append((src, dst))
+    return trash_dir, moved
+
+
+def delete_license_with_trash(
+    session: Session,
+    license_id: int,
+    data_dir: Path | None = None,
+) -> dict | None:
+    """Hard-delete a License row and move its ``.lic`` file to trash.
+
+    Distinct from :func:`crud.revoke_license` which is a soft flag — this is
+    permanent removal of the DB record.
+
+    Args:
+        session: Open SQLAlchemy session (caller commits).
+        license_id: ``License.id`` to delete.
+        data_dir: Optional trash-root override for tests.
+
+    Returns:
+        Report dict (``license_id`` / ``client`` / ``project_id`` /
+        ``trash_dir`` / ``moved_files``) or ``None`` if the license was not found.
+    """
+    lic = session.get(License, license_id)
+    if lic is None:
+        return None
+    info = {
+        "license_id": license_id,
+        "client": lic.client_name,
+        "project_id": lic.project_id,
+    }
+    paths: list[Path | str] = []
+    if lic.lic_file_path:
+        paths.append(lic.lic_file_path)
+    trash_dir, moved = move_to_trash(paths, label=f"license-{license_id}", data_dir=data_dir)
+    session.delete(lic)
+    session.flush()
+    info["trash_dir"] = str(trash_dir) if trash_dir else None
+    info["moved_files"] = [str(dst) for _, dst in moved]
+    return info
+
+
+def delete_key_with_trash(
+    session: Session,
+    project_id: str,
+    version: int,
+    data_dir: Path | None = None,
+) -> dict | None:
+    """Hard-delete a Key row, cascade-delete its dependent License rows, trash all files.
+
+    Cascade semantics (per design): every License whose ``(project_id, key_version)``
+    matches the target key is **hard-deleted** along with the key — including
+    already-revoked licenses, because their ``key_version`` reference is about to
+    dangle. Their ``.lic`` files (if recorded and present on disk) are moved to
+    trash together with the private/public key ``.pem`` files.
+
+    Args:
+        session: Open SQLAlchemy session (caller commits).
+        project_id: Project the key belongs to.
+        version: Key version to delete.
+        data_dir: Optional trash-root override for tests.
+
+    Returns:
+        Report dict or ``None`` if the key was not found.
+    """
+    key = session.execute(
+        select(Key).where(Key.project_id == project_id, Key.version == version)
+    ).scalar_one_or_none()
+    if key is None:
+        return None
+
+    dep_lics = session.execute(
+        select(License).where(
+            License.project_id == project_id,
+            License.key_version == version,
+        )
+    ).scalars().all()
+
+    paths: list[Path | str] = []
+    if key.private_key_path:
+        priv = Path(key.private_key_path).expanduser()
+        paths.append(priv)
+        # Conventional companion public key — same dir, public_key_vN.pem
+        paths.append(priv.parent / f"public_key_v{version}.pem")
+    for lic in dep_lics:
+        if lic.lic_file_path:
+            paths.append(lic.lic_file_path)
+
+    trash_dir, moved = move_to_trash(
+        paths, label=f"key-{project_id}-v{version}", data_dir=data_dir
+    )
+
+    deleted_license_ids = [lic.id for lic in dep_lics]
+    for lic in dep_lics:
+        session.delete(lic)
+    session.delete(key)
+    session.flush()
+
+    return {
+        "project_id": project_id,
+        "key_version": version,
+        "deleted_licenses": deleted_license_ids,
+        "trash_dir": str(trash_dir) if trash_dir else None,
+        "moved_files": [str(dst) for _, dst in moved],
+    }
+
+
+def delete_project_with_trash(
+    session: Session,
+    project_id: str,
+    data_dir: Path | None = None,
+) -> dict | None:
+    """Hard-delete a Project; ORM cascade removes its Keys + Licenses; trash all files.
+
+    Files trashed:
+      * Every key's ``private_key_path`` + its companion ``public_key_vN.pem``
+        (resolved per-key, so custom ``keys_dir`` overrides are honoured).
+      * Every license's ``lic_file_path`` (if recorded and present on disk).
+
+    Args:
+        session: Open SQLAlchemy session (caller commits).
+        project_id: Project id to delete.
+        data_dir: Optional trash-root override for tests.
+
+    Returns:
+        Report dict or ``None`` if the project was not found.
+    """
+    project = session.get(Project, project_id)
+    if project is None:
+        return None
+    keys = list(project.keys)
+    licenses = list(project.licenses)
+
+    paths: list[Path | str] = []
+    seen: set[Path] = set()
+    for k in keys:
+        if k.private_key_path:
+            priv = Path(k.private_key_path).expanduser()
+            if priv not in seen:
+                paths.append(priv); seen.add(priv)
+            pub = priv.parent / f"public_key_v{k.version}.pem"
+            if pub not in seen:
+                paths.append(pub); seen.add(pub)
+    for lic in licenses:
+        if lic.lic_file_path:
+            p = Path(lic.lic_file_path).expanduser()
+            if p not in seen:
+                paths.append(p); seen.add(p)
+
+    trash_dir, moved = move_to_trash(
+        paths, label=f"project-{project_id}", data_dir=data_dir
+    )
+
+    deleted_keys = [(k.version, k.algorithm, k.public_key_fp[:16]) for k in keys]
+    deleted_license_ids = [lic.id for lic in licenses]
+
+    # ORM cascade: deleting the Project sweeps its keys + licenses (Project model
+    # declares cascade="all, delete-orphan" on both relationships).
+    session.delete(project)
+    session.flush()
+
+    return {
+        "project_id": project_id,
+        "deleted_keys": deleted_keys,
+        "deleted_licenses": deleted_license_ids,
+        "trash_dir": str(trash_dir) if trash_dir else None,
+        "moved_files": [str(dst) for _, dst in moved],
+    }
+
+
+def retire_key(session: Session, project_id: str, version: int) -> bool:
+    """Soft-retire a key by setting ``retired_at`` to now.
+
+    Reversible: setting ``retired_at`` back to ``None`` re-activates the key.
+    Returns ``False`` if the key is not found OR already retired.
+
+    Args:
+        session: Open SQLAlchemy session (caller commits).
+        project_id: Project the key belongs to.
+        version: Key version to retire.
+    """
+    key = session.execute(
+        select(Key).where(Key.project_id == project_id, Key.version == version)
+    ).scalar_one_or_none()
+    if key is None or key.retired_at is not None:
+        return False
+    key.retired_at = datetime.now()
+    session.flush()
+    return True

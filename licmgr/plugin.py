@@ -22,19 +22,26 @@ from poetry.plugins.application_plugin import ApplicationPlugin
 
 from licmgr.commands.db import DbExportCommand, DbRelinkKeysCommand
 from licmgr.commands.key import (
+    KeyDeleteCommand,
     KeyGenerateCommand,
     KeyImportCommand,
     KeyListCommand,
+    KeyRetireCommand,
     KeyShowCommand,
     KeyVerifyCommand,
 )
 from licmgr.commands.license import (
+    LicenseDeleteCommand,
     LicenseExportCommand,
     LicenseIssueCommand,
     LicenseListCommand,
     LicenseRevokeCommand,
 )
-from licmgr.commands.project import ProjectCreateCommand, ProjectListCommand
+from licmgr.commands.project import (
+    ProjectCreateCommand,
+    ProjectDeleteCommand,
+    ProjectListCommand,
+)
 from licmgr.commands.sdk import SdkExportCommand
 
 
@@ -46,6 +53,9 @@ class _LicmgrProjectCreate(ProjectCreateCommand):
 
 class _LicmgrProjectList(ProjectListCommand):
     name = "licmgr project list"
+
+class _LicmgrProjectDelete(ProjectDeleteCommand):
+    name = "licmgr project delete"
 
 class _LicmgrKeyGenerate(KeyGenerateCommand):
     name = "licmgr key generate"
@@ -61,6 +71,12 @@ class _LicmgrKeyShow(KeyShowCommand):
 
 class _LicmgrKeyVerify(KeyVerifyCommand):
     name = "licmgr key verify"
+
+class _LicmgrKeyDelete(KeyDeleteCommand):
+    name = "licmgr key delete"
+
+class _LicmgrKeyRetire(KeyRetireCommand):
+    name = "licmgr key retire"
 
 class _LicmgrDbRelinkKeys(DbRelinkKeysCommand):
     name = "licmgr db relink-keys"
@@ -79,6 +95,9 @@ class _LicmgrLicenseExport(LicenseExportCommand):
 
 class _LicmgrLicenseRevoke(LicenseRevokeCommand):
     name = "licmgr license revoke"
+
+class _LicmgrLicenseDelete(LicenseDeleteCommand):
+    name = "licmgr license delete"
 
 class _LicmgrSdkExport(SdkExportCommand):
     name = "licmgr sdk export"
@@ -106,17 +125,21 @@ class LicmgrPlugin(ApplicationPlugin):
             _LicmgrTui,
             _LicmgrProjectCreate,
             _LicmgrProjectList,
+            _LicmgrProjectDelete,
             _LicmgrKeyGenerate,
             _LicmgrKeyImport,
             _LicmgrKeyList,
             _LicmgrKeyShow,
             _LicmgrKeyVerify,
+            _LicmgrKeyDelete,
+            _LicmgrKeyRetire,
             _LicmgrDbRelinkKeys,
             _LicmgrDbExport,
             _LicmgrLicenseIssue,
             _LicmgrLicenseList,
             _LicmgrLicenseExport,
             _LicmgrLicenseRevoke,
+            _LicmgrLicenseDelete,
             _LicmgrSdkExport,
         ]
         for cls in commands:

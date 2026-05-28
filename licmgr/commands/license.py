@@ -246,3 +246,57 @@ class LicenseRevokeCommand(Command):
         else:
             self.line_error(f"<error>License #{license_id} not found.</error>")
             return 1
+
+
+class LicenseDeleteCommand(Command):
+    """Hard-delete a license record (distinct from revoke, which is a soft flag)."""
+
+    name = "license delete"
+    description = (
+        "Hard-delete a license record and move its .lic file to ~/.licmgr/.trash/. "
+        "Unlike 'license revoke', the DB row is permanently removed."
+    )
+
+    arguments = [
+        argument("license-id", "License record ID (see 'license list')"),
+    ]
+
+    options = [
+        option("--yes", "-y", "Skip the confirmation prompt (for CI/CD use)", flag=True),
+    ]
+
+    def handle(self) -> int:
+        """Execute the command."""
+        from licmgr.core import dbmaint
+        from licmgr.core.db.engine import get_session
+
+        init_db()
+        try:
+            license_id = int(self.argument("license-id"))
+        except ValueError:
+            self.line_error("<error>license-id must be an integer.</error>")
+            return 1
+
+        lic = get_license(license_id)
+        if lic is None:
+            self.line_error(f"<error>License #{license_id} not found.</error>")
+            return 1
+
+        self.line(f"License #{lic.id} — client={lic.client_name!r} project={lic.project_id}")
+        self.line(f"  .lic file: {lic.lic_file_path or '(none recorded)'}")
+
+        if not self.option("yes"):
+            ok = self.confirm("Permanently delete this license?", default=False)
+            if not ok:
+                self.line("<comment>Aborted.</comment>")
+                return 0
+
+        with get_session() as s:
+            report = dbmaint.delete_license_with_trash(s, license_id)
+        if report is None:
+            self.line_error(f"<error>License #{license_id} not found.</error>")
+            return 1
+        self.line(f"<info>License #{license_id} deleted.</info>")
+        if report["trash_dir"]:
+            self.line(f"  files moved → {report['trash_dir']}")
+        return 0

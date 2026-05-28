@@ -73,6 +73,116 @@ def _licenses_dir() -> Path:
     return Path(raw).expanduser() if raw else Path.cwd() / "projects"
 
 
+# ── Entry overview ────────────────────────────────────────────────────────────
+
+def _print_overview() -> None:
+    """Print the registry-overview banner above the main menu.
+
+    Called fresh on every main-menu iteration so the snapshot reflects state
+    *after* returning from any submenu (delete, create, retire …). Shows
+    aggregate counts and a compact per-project table; the critical signal is
+    the per-project "private-key file exists?" column (DB may record a path
+    whose file is gone, e.g. moved or deleted).
+
+    Never shows raw key material — only public-key-fingerprint prefixes.
+    """
+    projects = list_projects()
+
+    if not projects:
+        console.print(Panel(
+            "[dim]尚無任何專案。請從「📁  專案管理 → 新增專案」開始。[/dim]",
+            title="[bold cyan]licmgr 總覽[/bold cyan]",
+            expand=False,
+        ))
+        return
+
+    # Aggregate counts — single pass per category.
+    total_keys = 0
+    total_keys_active = 0
+    total_lics = 0
+    total_lics_active = 0
+    per_project: list[tuple] = []  # (project, keys, licenses)
+
+    for p in projects:
+        ks = list_keys(p.id)
+        ls = list_licenses(p.id)
+        total_keys += len(ks)
+        total_keys_active += sum(1 for k in ks if k.retired_at is None)
+        total_lics += len(ls)
+        total_lics_active += sum(1 for lic in ls if not lic.revoked)
+        per_project.append((p, ks, ls))
+
+    summary = (
+        f"專案數: [bold]{len(projects)}[/bold]   "
+        f"金鑰數: [bold]{total_keys}[/bold] "
+        f"(可用 [green]{total_keys_active}[/green] / "
+        f"退役 [red]{total_keys - total_keys_active}[/red])   "
+        f"授權數: [bold]{total_lics}[/bold] "
+        f"(有效 [green]{total_lics_active}[/green] / "
+        f"撤銷 [red]{total_lics - total_lics_active}[/red])"
+    )
+    console.print(Panel(summary, title="[bold cyan]licmgr 總覽[/bold cyan]", expand=False))
+
+    t = Table(show_header=True, header_style="bold cyan", expand=False)
+    t.add_column("專案", no_wrap=True)
+    t.add_column("名稱", no_wrap=True)
+    t.add_column("版本")
+    t.add_column("金鑰", no_wrap=True)
+    t.add_column("私鑰檔", no_wrap=True)
+    t.add_column("公鑰指紋(前16)")
+    t.add_column("授權", justify="right")
+    t.add_column("建立日")
+
+    for p, ks, ls in per_project:
+        # Pick the key whose private-key existence drives the icon: prefer the
+        # active key (newest non-retired); fall back to the newest overall.
+        active = next((k for k in ks if k.retired_at is None), None)
+        pick = active or (ks[0] if ks else None)
+
+        if pick is None:
+            key_col = "—"
+            priv_col = "—"
+            fp_col = "—"
+        else:
+            ver_label = f"v{pick.version}"
+            if active is None:
+                ver_label += " [dim](已退役)[/dim]"
+            elif len(ks) > 1:
+                ver_label += f" [dim](共 {len(ks)})[/dim]"
+            key_col = ver_label
+
+            priv_path = (
+                Path(pick.private_key_path).expanduser()
+                if pick.private_key_path else None
+            )
+            if priv_path and priv_path.is_file():
+                priv_col = "[green]✓ 存在[/green]"
+            else:
+                priv_col = "[red]✗ 遺失[/red]"
+
+            fp_col = (pick.public_key_fp[:16] + "...") if pick.public_key_fp else "—"
+
+        active_lics = sum(1 for lic in ls if not lic.revoked)
+        if not ls:
+            lic_col = "0"
+        else:
+            lic_col = f"{len(ls)} ({active_lics}/{len(ls) - active_lics})"
+
+        t.add_row(
+            p.id,
+            p.display_name or "—",
+            p.version,
+            key_col,
+            priv_col,
+            fp_col,
+            lic_col,
+            p.created_at.strftime("%Y-%m-%d"),
+        )
+
+    console.print(t)
+    console.print()  # blank line before the menu prompt
+
+
 # ── Project menu ──────────────────────────────────────────────────────────────
 
 def _project_menu() -> None:
@@ -766,11 +876,17 @@ def _import_db() -> None:
 # ── DB maintenance menu ─────────────────────────────────────────────────────
 
 def _dbmaint_menu() -> None:
-    """Submenu for DB maintenance: scan / relink key paths and selective export."""
+    """Submenu for DB maintenance: scan / relink key paths, selective export, delete."""
     while True:
         action = _ask(lambda: questionary.select(
             "🔁 DB 維運",
-            choices=["檢查金鑰路徑", "修復金鑰路徑", "選擇性匯出", _BACK],
+            choices=[
+                "檢查金鑰路徑",
+                "修復金鑰路徑",
+                "選擇性匯出",
+                "🗑  刪除（專案 / 金鑰 / 授權）",
+                _BACK,
+            ],
         ).ask())
         if action is None or action == _BACK:
             return
@@ -780,6 +896,265 @@ def _dbmaint_menu() -> None:
             _dbmaint_relink()
         elif action == "選擇性匯出":
             _dbmaint_export()
+        elif action.startswith("🗑"):
+            _dbmaint_delete_menu()
+
+
+# ── DB 維運：刪除子選單 ───────────────────────────────────────────────────────
+
+def _pick_project() -> Project | None:
+    """Shared helper: let the user pick one project from the registry.
+
+    Returns the selected Project (with a refreshed read of related collections
+    not done here — callers should re-fetch keys/licenses) or None on cancel.
+    """
+    projects = list_projects()
+    if not projects:
+        console.print("[yellow]尚無任何專案。[/yellow]")
+        return None
+    choices = [
+        questionary.Choice(
+            f"{p.id}  —  {p.display_name or '(無名稱)'}",
+            value=p.id,
+        )
+        for p in projects
+    ] + [questionary.Choice(_CANCEL, value=None)]
+    pid = _ask(lambda: questionary.select("選擇專案：", choices=choices).ask())
+    if not pid:
+        return None
+    return next((p for p in projects if p.id == pid), None)
+
+
+def _dbmaint_delete_menu() -> None:
+    """Sub-submenu for destructive ops; checkbox confirms keep the user safe."""
+    console.print(Panel(
+        "[red]這些操作會永久變更 DB[/red]。檔案會搬到 [cyan]~/.licmgr/.trash/[/cyan],"
+        "不會直接消失,可手動還原。",
+        title="[red bold]🗑  刪除維運[/red bold]",
+        expand=False,
+    ))
+    while True:
+        action = _ask(lambda: questionary.select(
+            "選擇刪除動作",
+            choices=[
+                "刪除授權紀錄  (License)",
+                "退役金鑰版本  (Key.retired_at=now,可逆)",
+                "刪除金鑰版本  (Key + cascade 其下所有 license)",
+                "刪除專案      (Project + 全部下層,核彈級)",
+                _BACK,
+            ],
+        ).ask())
+        if action is None or action == _BACK:
+            return
+        if action.startswith("刪除授權"):
+            _delete_license_tui()
+        elif action.startswith("退役金鑰"):
+            _retire_key_tui()
+        elif action.startswith("刪除金鑰"):
+            _delete_key_tui()
+        elif action.startswith("刪除專案"):
+            _delete_project_tui()
+
+
+def _delete_license_tui() -> None:
+    """TUI flow: pick project → pick license → confirm → hard delete + trash .lic."""
+    from licmgr.core import dbmaint
+
+    project = _pick_project()
+    if project is None:
+        return
+    lics = list_licenses(project.id)
+    if not lics:
+        console.print(f"[yellow]'{project.id}' 尚無授權紀錄。[/yellow]")
+        return
+    _list_licenses_tui(project.id)
+
+    choices = [
+        questionary.Choice(
+            f"#{lic.id}  {lic.client_name}  fp={lic.machine_fp[:16]}...  "
+            f"key v{lic.key_version}  {'[已撤銷]' if lic.revoked else '[有效]'}",
+            value=lic.id,
+        )
+        for lic in lics
+    ] + [questionary.Choice(_CANCEL, value=None)]
+    pick = _ask(lambda: questionary.select("選擇要硬刪的授權：", choices=choices).ask())
+    if pick is None:
+        return
+
+    lic = next(lic for lic in lics if lic.id == pick)
+    console.print(Panel(
+        f"[bold red]即將永久刪除授權 #{lic.id}[/bold red]\n"
+        f"專案: {lic.project_id}\n"
+        f"客戶: {lic.client_name}\n"
+        f"指紋: {lic.machine_fp}\n"
+        f".lic 檔: {lic.lic_file_path or '(無紀錄)'}\n"
+        f"[dim]註: 與「撤銷」不同,此動作會把 DB row 永久移除。[/dim]",
+        title="[red]確認刪除[/red]",
+        expand=False,
+    ))
+    confirm = _ask(lambda: questionary.confirm(
+        "確認刪除?(.lic 檔將搬至 ~/.licmgr/.trash/)", default=False
+    ).ask())
+    if not confirm:
+        return
+
+    with get_session() as s:
+        report = dbmaint.delete_license_with_trash(s, pick)
+    if report is None:
+        console.print("[red]找不到該授權。[/red]")
+        return
+    console.print(f"[green]✓ 已刪除授權 #{pick}。[/green]")
+    if report["trash_dir"]:
+        console.print(f"[dim]  檔案已搬移至:{report['trash_dir']}[/dim]")
+    else:
+        console.print("[dim]  (無 .lic 檔需要搬移)[/dim]")
+
+
+def _retire_key_tui() -> None:
+    """TUI flow: pick project → pick non-retired key → confirm → retire (soft)."""
+    from licmgr.core import dbmaint
+
+    project = _pick_project()
+    if project is None:
+        return
+    keys = list_keys(project.id)
+    active = [k for k in keys if k.retired_at is None]
+    if not active:
+        console.print(f"[yellow]'{project.id}' 沒有可退役的金鑰(全部都已退役)。[/yellow]")
+        return
+    _list_keys_tui(project.id)
+
+    choices = [
+        questionary.Choice(
+            f"v{k.version}  fp={k.public_key_fp[:16]}...  "
+            f"建立 {k.created_at.strftime('%Y-%m-%d')}",
+            value=k.version,
+        )
+        for k in active
+    ] + [questionary.Choice(_CANCEL, value=None)]
+    pick = _ask(lambda: questionary.select("選擇要退役的金鑰版本：", choices=choices).ask())
+    if pick is None:
+        return
+
+    confirm = _ask(lambda: questionary.confirm(
+        f"確認退役 {project.id} v{pick}?(可逆,不刪檔)", default=True
+    ).ask())
+    if not confirm:
+        return
+
+    with get_session() as s:
+        ok = dbmaint.retire_key(s, project.id, pick)
+    if ok:
+        console.print(f"[green]✓ {project.id} v{pick} 已退役(retired_at=now)。[/green]")
+    else:
+        console.print("[red]退役失敗(金鑰已退役或不存在)。[/red]")
+
+
+def _delete_key_tui() -> None:
+    """TUI flow: pick project → pick key → show dependent licenses → confirm → cascade delete."""
+    from sqlalchemy import select as _select
+
+    from licmgr.core import dbmaint
+
+    project = _pick_project()
+    if project is None:
+        return
+    keys = list_keys(project.id)
+    if not keys:
+        console.print(f"[yellow]'{project.id}' 尚無金鑰。[/yellow]")
+        return
+    _list_keys_tui(project.id)
+
+    choices = [
+        questionary.Choice(
+            f"v{k.version}  fp={k.public_key_fp[:16]}...  "
+            f"{'[退役]' if k.retired_at else '[使用中]'}  "
+            f"建立 {k.created_at.strftime('%Y-%m-%d')}",
+            value=k.version,
+        )
+        for k in keys
+    ] + [questionary.Choice(_CANCEL, value=None)]
+    pick = _ask(lambda: questionary.select("選擇要硬刪的金鑰版本：", choices=choices).ask())
+    if pick is None:
+        return
+
+    key = next(k for k in keys if k.version == pick)
+    # Look up dependent licenses (same project + key_version) ourselves so we can
+    # show the cascade impact before asking for confirmation.
+    with get_session() as s:
+        dep = s.execute(_select(License).where(
+            License.project_id == project.id,
+            License.key_version == pick,
+        )).scalars().all()
+        active_dep = sum(1 for lic in dep if not lic.revoked)
+
+    console.print(Panel(
+        f"[bold red]即將永久刪除 {project.id} 的金鑰 v{pick}[/bold red]\n"
+        f"私鑰檔: {key.private_key_path or '(無紀錄)'}\n"
+        f"連動授權: [bold]{len(dep)}[/bold] 筆 "
+        f"([green]{active_dep}[/green] 有效 / [red]{len(dep) - active_dep}[/red] 撤銷)\n"
+        f"[dim]註: 所有 .pem / .lic 檔將搬至 ~/.licmgr/.trash/;DB row 全部硬刪。[/dim]\n"
+        f"[dim]提示: 若只是要換金鑰,可改用「退役金鑰版本」(可逆,不刪檔)。[/dim]",
+        title="[red]確認 cascade 刪除[/red]",
+        expand=False,
+    ))
+    confirm = _ask(lambda: questionary.confirm(
+        f"確認硬刪 {project.id} v{pick} 與其下 {len(dep)} 筆 license?",
+        default=False,
+    ).ask())
+    if not confirm:
+        return
+
+    with get_session() as s:
+        report = dbmaint.delete_key_with_trash(s, project.id, pick)
+    if report is None:
+        console.print("[red]找不到該金鑰。[/red]")
+        return
+    console.print(
+        f"[green]✓ 已刪除 {project.id} v{pick} "
+        f"(連動移除 {len(report['deleted_licenses'])} 筆 license)。[/green]"
+    )
+    if report["trash_dir"]:
+        console.print(f"[dim]  檔案已搬移至:{report['trash_dir']}[/dim]")
+
+
+def _delete_project_tui() -> None:
+    """TUI flow: pick project → show impact → require typed-id confirmation → cascade delete."""
+    from licmgr.core import dbmaint
+
+    project = _pick_project()
+    if project is None:
+        return
+    keys = list_keys(project.id)
+    lics = list_licenses(project.id)
+
+    console.print(Panel(
+        f"[bold red]即將永久刪除整個專案 '{project.id}'[/bold red]\n"
+        f"名稱: {project.display_name}\n"
+        f"金鑰: [bold]{len(keys)}[/bold] 筆(會一起被硬刪)\n"
+        f"授權: [bold]{len(lics)}[/bold] 筆(會一起被硬刪)\n"
+        f"[dim]所有 .pem / .lic 檔將搬至 ~/.licmgr/.trash/(可手動還原)。[/dim]",
+        title="[red bold]☢  Project 核彈級刪除[/red bold]",
+        expand=False,
+    ))
+    typed = _ask(lambda: questionary.text(
+        f"為了確認,請完整鍵入專案 ID('{project.id}'):"
+    ).ask())
+    if typed != project.id:
+        console.print("[yellow]ID 不符,已取消。[/yellow]")
+        return
+
+    with get_session() as s:
+        report = dbmaint.delete_project_with_trash(s, project.id)
+    if report is None:
+        console.print("[red]找不到該專案。[/red]")
+        return
+    console.print(
+        f"[green]✓ 專案 '{project.id}' 已刪除 — "
+        f"keys: {len(report['deleted_keys'])},licenses: {len(report['deleted_licenses'])}。[/green]"
+    )
+    if report["trash_dir"]:
+        console.print(f"[dim]  檔案已搬移至:{report['trash_dir']}[/dim]")
 
 
 def _dbmaint_scan() -> None:
@@ -1080,6 +1455,9 @@ def main() -> None:
 
     try:
         while True:
+            # Overview re-renders every iteration so it reflects the latest state
+            # after returning from any submenu (create, delete, retire, …).
+            _print_overview()
             choice = _ask(lambda: questionary.select("主選單", choices=list(menu_items.keys())).ask())
             if choice is None or choice == "🚪  離開":
                 console.print("[dim]再見。[/dim]")
